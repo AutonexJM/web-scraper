@@ -22,6 +22,7 @@ def is_within_24_hours(date_text):
     """
     text = date_text.lower()
     if 'just now' in text or 'today' in text: return True
+    # Matches "4h", "14h", "30m"
     if re.search(r'\d+\s*h', text) or re.search(r'\d+\s*m', text): return True
     return False
 
@@ -55,7 +56,7 @@ def parse_relative_date(date_text):
 
 # --- MAIN SCRAPER ---
 
-def scrape_jobs_pro(keyword="software engineer", limit=5):
+def scrape_jobs_pro(keyword="all", limit=5, is_test_mode=False):
     data = []
     seen_urls = set()
     
@@ -70,14 +71,25 @@ def scrape_jobs_pro(keyword="software engineer", limit=5):
         )
         page = context.new_page()
 
-        url = f"https://wellfound.com/jobs?role={keyword}&locations=Latin+America"
-        print(f"Log: Visiting {url}...", file=sys.stderr)
+        # --- URL LOGIC (ALL JOBS vs SPECIFIC ROLE) ---
+        if keyword.lower() == "all" or keyword == "":
+            # Search ALL jobs in LATAM
+            url = "https://wellfound.com/jobs?locations=Latin+America"
+            print(f"Log: Searching ALL jobs in LATAM...", file=sys.stderr)
+        else:
+            # Search specific role
+            url = f"https://wellfound.com/jobs?role={keyword}&locations=Latin+America"
+            print(f"Log: Searching for '{keyword}' in LATAM...", file=sys.stderr)
         
+        if is_test_mode:
+            print("Log: TEST MODE ON (Ignorning 24h limit)", file=sys.stderr)
+
         try:
             page.goto(url, timeout=60000)
             page.wait_for_load_state("networkidle")
         except: pass
 
+        # Scroll
         for _ in range(3):
             page.mouse.wheel(0, 3000)
             random_sleep(1, 2)
@@ -100,15 +112,22 @@ def scrape_jobs_pro(keyword="software engineer", limit=5):
                         date_posted_raw = txt
                         break
                 
-                if not is_within_24_hours(date_posted_raw): continue 
+                # --- FILTER LOGIC ---
+                # Kung HINDI Test Mode, i-apply ang Strict 24h Filter.
+                # Kung Test Mode, lusot lang kahit luma na.
+                if not is_test_mode:
+                    if not is_within_24_hours(date_posted_raw): continue 
 
-                # 2. Salary Check
+                # 2. Salary Check (Keep this strict para USD lang makuha mo)
                 raw_text = card.inner_text()
                 if "₹" in raw_text or "€" in raw_text or "£" in raw_text: continue 
                 
                 salary_text = "Hidden"
                 salary_loc = card.locator('span:has-text("$")')
                 if salary_loc.count() > 0: salary_text = salary_loc.first.inner_text()
+                
+                # Uncomment next line kung gusto mo USD SHOWN only (no hidden)
+                # if "$" not in salary_text: continue
 
                 # 3. Duplicate Check
                 link = card.locator('a').first
@@ -163,7 +182,7 @@ def scrape_jobs_pro(keyword="software engineer", limit=5):
                     for t in detail_page.locator('div[class*="Tag"]').all(): tags.append(t.inner_text())
                 except: pass
                 
-                tools_found = [t for t in tags if any(kt in t for kt in ["Python", "React", "Node", "AWS", "Docker", "SQL", "Java", "Go"])]
+                tools_found = [t for t in tags if any(kt.lower() in t.lower() for kt in ["Python", "React", "Node", "AWS", "Docker", "SQL", "Java", "Go", "Javascript", "Typescript", "PHP", "Laravel"])]
                 industries_found = [t for t in tags if t not in tools_found]
                 if not tools_found: tools_found = tags[:3]
 
@@ -176,7 +195,7 @@ def scrape_jobs_pro(keyword="software engineer", limit=5):
                         app_type = "External Application"
                 except: pass
 
-                # Build Data (ITO YUNG PART NA MAY ERROR KANINA, INAYOS KO NA)
+                # Build Data
                 job_data = {
                     "job_title": title,
                     "company_name": company,
@@ -208,6 +227,15 @@ def scrape_jobs_pro(keyword="software engineer", limit=5):
     print(json.dumps(data))
 
 if __name__ == "__main__":
-    kw = sys.argv[1] if len(sys.argv) > 1 else "software engineer"
+    # ARG 1: Keyword (Use "all" for everything)
+    kw = sys.argv[1] if len(sys.argv) > 1 else "all"
+    
+    # ARG 2: Limit
     lim = int(sys.argv[2]) if len(sys.argv) > 2 else 5
-    scrape_jobs_pro(kw, lim)
+    
+    # ARG 3: Test Mode (If present, disable 24h filter)
+    test_mode = False
+    if len(sys.argv) > 3 and sys.argv[3] == "test":
+        test_mode = True
+        
+    scrape_jobs_pro(kw, lim, test_mode)
