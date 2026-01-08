@@ -16,7 +16,7 @@ LATAM_KEYWORDS = [
     "Peru", "Puerto Rico", "Uruguay", "Venezuela"
 ]
 
-def random_sleep(min_s=2, max_s=5):
+def random_sleep(min_s=3, max_s=6):
     time.sleep(random.uniform(min_s, max_s))
 
 def clean_text(text):
@@ -39,7 +39,7 @@ def is_within_24_hours(date_text):
 def parse_relative_date(date_text):
     try:
         today = datetime.now()
-        date_text = date_text.lower().replace("reposted:", "").strip() # Clean "Reposted"
+        date_text = date_text.lower().replace("reposted:", "").strip()
         target_date = today 
         if 'yesterday' in date_text: target_date = today - timedelta(days=1)
         elif 'mo' in date_text:
@@ -65,53 +65,87 @@ def scrape_jobs_pro(keyword="all", limit=5, is_test_mode=False):
     seen_urls = set()
     
     with sync_playwright() as p:
-        # Browser Launch 
+        # 1. HEAVY STEALTH ARGS
         browser = p.chromium.launch(
             headless=True, 
             args=[
                 '--no-sandbox', 
                 '--disable-setuid-sandbox', 
-                '--disable-blink-features=AutomationControlled'
+                '--disable-blink-features=AutomationControlled',
+                '--disable-infobars',
+                '--window-size=1920,1080',
+                '--start-maximized'
             ]
         )
+        
+        # 2. DEVICE EMULATION
         context = browser.new_context(
             user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             viewport={'width': 1920, 'height': 1080},
-            locale='en-US'
+            locale='en-US',
+            timezone_id='America/New_York'
         )
+        
+        # 3. SET HEADERS (MAGMUKHANG GALING GOOGLE)
+        context.set_extra_http_headers({
+            "Referer": "https://www.google.com/",
+            "Upgrade-Insecure-Requests": "1",
+            "Accept-Language": "en-US,en;q=0.9",
+            "sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"'
+        })
         
         page = context.new_page()
         
-        # Manual Stealth
-        page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        # 4. JS BYPASS
+        page.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+            window.chrome = { runtime: {} };
+        """)
 
-        # URL Strategy
+        # URL SELECTION
         if keyword.lower() == "all" or keyword == "":
+            # Use specific landing page instead of generic /jobs to avoid redirect
             url = "https://wellfound.com/jobs"
-            print(f"Log: Searching ALL jobs...", file=sys.stderr)
+            print(f"Log: Searching ALL jobs via Google Referrer...", file=sys.stderr)
         else:
-            url = f"https://wellfound.com/jobs?role={keyword}"
-            print(f"Log: Searching for '{keyword}'...", file=sys.stderr)
-        
+            url = f"https://wellfound.com/role/{keyword.replace(' ', '-').lower()}"
+            print(f"Log: Searching for role '{keyword}'...", file=sys.stderr)
+
         try:
             page.goto(url, timeout=60000)
             random_sleep(3, 5) 
 
-            # Check Redirects
-            if "Log In" in page.content() or page.title().strip() == "wellfound.com":
-                 print("Log: Homepage Redirect detected. Trying to click Jobs...", file=sys.stderr)
+            # TITLE CHECK DEBUG
+            page_title = page.title()
+            print(f"Log: Page Title: '{page_title}'", file=sys.stderr)
+
+            # REDIRECT HANDLER
+            if "Log In" in page.content() or page_title.strip() == "wellfound.com" or "Wellfound: " in page_title:
+                 print("Log: Redirected to Home. Trying to navigate via UI...", file=sys.stderr)
                  try:
-                     page.get_by_text("Jobs", exact=True).first.click()
-                     page.wait_for_load_state("networkidle")
-                 except: pass
+                     # Hanapin ang 'Find a job' o 'Jobs' link
+                     job_link = page.get_by_role("link", name="Jobs").first
+                     if not job_link.is_visible():
+                         job_link = page.get_by_role("link", name="Find a job").first
+                     
+                     if job_link.is_visible():
+                         job_link.click()
+                         page.wait_for_load_state("networkidle")
+                         random_sleep(2, 4)
+                 except Exception as e:
+                     print(f"Log: Failed to click jobs: {e}", file=sys.stderr)
 
         except Exception as e:
             print(f"Log: Nav error: {e}", file=sys.stderr)
 
         # Scroll
+        print("Log: Scrolling...", file=sys.stderr)
         for _ in range(5):
-            page.mouse.wheel(0, 4000)
-            random_sleep(1, 3)
+            page.mouse.wheel(0, 5000)
+            random_sleep(2, 4)
 
         # Find Cards
         job_cards = page.locator('div[data-test="JobCard"]').all()
@@ -120,6 +154,13 @@ def scrape_jobs_pro(keyword="all", limit=5, is_test_mode=False):
 
         print(f"Log: Found {len(job_cards)} cards.", file=sys.stderr)
 
+        # DEBUG HTML IF 0
+        if len(job_cards) == 0:
+            h1 = "No H1"
+            try: h1 = page.locator("h1").inner_text()
+            except: pass
+            print(f"Log: NO CARDS. Current H1: '{h1}'.", file=sys.stderr)
+
         count = 0
         for card in job_cards:
             if count >= limit: break
@@ -127,7 +168,6 @@ def scrape_jobs_pro(keyword="all", limit=5, is_test_mode=False):
             try:
                 full_card_text = card.inner_text()
                 
-                # Filters
                 if not is_latam_location(full_card_text): continue
 
                 date_posted_raw = "Unknown"
@@ -142,15 +182,11 @@ def scrape_jobs_pro(keyword="all", limit=5, is_test_mode=False):
 
                 if "₹" in full_card_text or "€" in full_card_text or "£" in full_card_text: continue 
                 
-                # --- FIXED SALARY LOGIC HERE ---
                 salary_text = "Hidden"
                 if "$" in full_card_text:
                     lines = full_card_text.split('\n')
                     for l in lines:
-                        if "$" in l:
-                            salary_text = l
-                            break
-                # -------------------------------
+                        if "$" in l: salary_text = l; break
                 
                 try:
                     link = card.locator('a').first
@@ -165,9 +201,10 @@ def scrape_jobs_pro(keyword="all", limit=5, is_test_mode=False):
                 job_post_date = parse_relative_date(date_posted_raw)
 
                 detail_page = context.new_page()
+                detail_page.set_extra_http_headers({"Referer": "https://www.google.com/"})
                 detail_page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-                detail_page.goto(job_url)
                 
+                detail_page.goto(job_url)
                 try: detail_page.wait_for_selector('body', timeout=10000)
                 except: detail_page.close(); continue
                 random_sleep(1, 2)
