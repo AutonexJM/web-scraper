@@ -1,0 +1,217 @@
+import json
+import sys
+import time
+import re
+import random
+from datetime import datetime, timedelta
+from playwright.sync_api import sync_playwright
+from bs4 import BeautifulSoup
+
+# --- HELPER FUNCTIONS ---
+
+def random_sleep(min_s=2, max_s=5):
+    time.sleep(random.uniform(min_s, max_s))
+
+def clean_text(text):
+    if not text: return ""
+    return text.strip().replace('\n', ' ').replace('\r', '')
+
+def is_within_24_hours(date_text):
+    """
+    STRICT FILTER: Returns True only if job is < 24 hours old.
+    Criteria: Contains 'h' (hours), 'm' (mins), 'Just now', 'Today'.
+    Rejects: 'd' (days), 'Yesterday', 'w', 'mo'.
+    """
+    text = date_text.lower()
+    
+    # Accept specific "fresh" keywords
+    if 'just now' in text or 'today' in text:
+        return True
+    
+    # Accept hours (e.g., "14h", "2h ago") or minutes
+    # Regex checks if it starts with number followed by 'h' or 'm'
+    if re.search(r'\d+\s*h', text) or re.search(r'\d+\s*m', text):
+        return True
+        
+    # Reject everything else (d, w, mo, yesterday)
+    return False
+
+def parse_relative_date(date_text):
+    """
+    Convert relative time to WordPress Format: MM/DD/YYYY, 09:00 AM
+    """
+    try:
+        today = datetime.now()
+        date_text = date_text.lower()
+        target_date = today 
+        
+        # Simple parsing for WP Format
+        if 'yesterday' in date_text:
+            target_date = today - timedelta(days=1)
+        elif 'mo' in date_text:
+            match = re.search(r'\d+', date_text)
+            num = int(match.group()) if match else 1
+            target_date = today - timedelta(days=num*30)
+        elif 'w' in date_text:
+            match = re.search(r'\d+', date_text)
+            num = int(match.group()) if match else 1
+            target_date = today - timedelta(weeks=num)
+        elif 'd' in date_text:
+            match = re.search(r'\d+', date_text)
+            num = int(match.group()) if match else 1
+            target_date = today - timedelta(days=num)
+        
+        # Note: Hours/Mins usually fall under "Today" date
+        return target_date.strftime('%m/%d/%Y, 09:00 AM')
+    except:
+        return datetime.now().strftime('%m/%d/%Y, 09:00 AM')
+
+# --- MAIN SCRAPER ---
+
+def scrape_jobs_pro(keyword="software engineer", limit=5):
+    data = []
+    seen_urls = set() # Set para sa duplicate checking (within this run)
+    
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True, 
+            args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled']
+        )
+        context = browser.new_context(
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
+            viewport={'width': 1366, 'height': 768}
+        )
+        page = context.new_page()
+
+        url = f"https://wellfound.com/jobs?role={keyword}&locations=Latin+America"
+        print(f"Log: Visiting {url}...", file=sys.stderr)
+        
+        try:
+            page.goto(url, timeout=60000)
+            page.wait_for_load_state("networkidle")
+        except: pass
+
+        # Scroll to load fresh items
+        for _ in range(3):
+            page.mouse.wheel(0, 3000)
+            random_sleep(1, 2)
+
+        # Find Cards
+        job_cards = page.locator('div[data-test="JobCard"]').all()
+        if not job_cards: job_cards = page.locator('div[class^="styles_component__"]').all()
+
+        print(f"Log: Processing {len(job_cards)} cards (Strict 24h Filter)...", file=sys.stderr)
+
+        count = 0
+        for card in job_cards:
+            if count >= limit: break
+
+            try:
+                # 1. CHECK DATE FIRST (Optimization)
+                date_posted_raw = "Unknown"
+                meta_spans = card.locator('span').all_inner_texts()
+                
+                # Extract date text (e.g., "4h", "2d")
+                for txt in meta_spans:
+                    if re.match(r'\d+[dwhmo]', txt) or 'just now' in txt.lower() or 'today' in txt.lower() or 'yesterday' in txt.lower():
+                        date_posted_raw = txt
+                        break
+                
+                # --- STRICT 24H FILTER ---
+                # Kung hindi fresh (walang 'h', 'm', 'today'), SKIP AGAD.
+                if not is_within_24_hours(date_posted_raw):
+                    # print(f"Log: Skipped old job: {date_posted_raw}", file=sys.stderr)
+                    continue 
+
+                # 2. CHECK SALARY (USD Only)
+                raw_text = card.inner_text()
+                if "₹" in raw_text or "€" in raw_text or "£" in raw_text: continue 
+                
+                salary_text = "Hidden"
+                salary_loc = card.locator('span:has-text("$")')
+                if salary_loc.count() > 0: salary_text = salary_loc.first.inner_text()
+                # if "$" not in salary_text: continue # Uncomment for Strict USD
+
+                # 3. CHECK DUPLICATES (URL Check)
+                link = card.locator('a').first
+                job_url = "https://wellfound.com" + link.get_attribute('href')
+                
+                if job_url in seen_urls:
+                    continue # Skip duplicate in current list
+                seen_urls.add(job_url)
+
+                # --- IF PASSED FILTERS, SCRAPE DETAILS ---
+                
+                # Get Basic Info
+                title = card.locator('h2').first.inner_text()
+                company = card.locator('div[class*="companyName"]').first.inner_text()
+                job_post_date = parse_relative_date(date_posted_raw) # Format for WP
+
+                # Open Page
+                detail_page = context.new_page()
+                detail_page.goto(job_url)
+                try: detail_page.wait_for_selector('body', timeout=10000)
+                except: detail_page.close(); continue
+                random_sleep(1, 2)
+
+                # Scrape Content
+                content_html = detail_page.content()
+                soup = BeautifulSoup(content_html, 'html.parser')
+                full_text = soup.get_text(separator="\n")
+
+                # Get Website
+                company_website = "Not Available"
+                try:
+                    profile_link = detail_page.locator(f'a[href^="/company/"]').first
+                    if profile_link.count() > 0:
+                        profile_url = "https://wellfound.com" + profile_link.get_attribute('href')
+                        detail_page.goto(profile_url) # Go to profile
+                        try:
+                            website_el = detail_page.locator('a[data-test="CompanyUrl"]').first
+                            if website_el.count() == 0: website_el = detail_page.locator('a:has-text("Website")').first
+                            if website_el.count() > 0: company_website = website_el.get_attribute('href')
+                            else: company_website = profile_url
+                        except: company_website = profile_url
+                except: pass
+
+                # Extract Fields
+                qualifications = "See Job Description"
+                for marker in ["Requirements", "Qualifications", "What we look for", "Skills"]:
+                    if marker in full_text:
+                        try: qualifications = full_text.split(marker)[1].strip()[:1500]; break
+                        except: pass
+
+                company_desc = "See Description"
+                if f"About {company}" in full_text:
+                    try: company_desc = full_text.split(f"About {company}")[1].split("\n\n")[0][:800]
+                    except: pass
+
+                tags = []
+                try:
+                    for t in detail_page.locator('div[class*="Tag"]').all(): tags.append(t.inner_text())
+                except: pass
+                
+                tools_found = [t for t in tags if any(kt in t for kt in ["Python", "React", "Node", "AWS", "Docker", "SQL", "Java", "Go"])]
+                industries_found = [t for t in tags if t not in tools_found]
+                if not tools_found: tools_found = tags[:3]
+
+                hours = "Standard"
+                if "part-time" in full_text.lower(): hours = "Part-time"
+                
+                app_type = "Wellfound Easy Apply"
+                try:
+                    if "External" in detail_page.locator('button[data-test="ApplyButton"]').inner_text():
+                        app_type = "External Application"
+                except: pass
+
+                # Build Data
+                job_data = {
+                    "job_title": title,
+                    "company_name": company,
+                    "company_website": company_website,
+                    "job_post_date": job_post_date,
+                    "salary_offer": salary_text,
+                    "location": "Latin America (Remote)",
+                    "company_description": clean_text(company_desc),
+                    "job_description_snippet": clean_text(full_text[:1000]), 
+                    "qualifications": clean_text(qualification

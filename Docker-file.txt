@@ -1,0 +1,31 @@
+FROM python:3.9-slim
+
+# 1. Install System Deps & SSH Server
+RUN apt-get update && apt-get install -y \
+    openssh-server \
+    && rm -rf /var/lib/apt/lists/*
+
+# 2. Setup SSH
+RUN mkdir /var/run/sshd
+# Set root password (PALITAN MO TO!)
+RUN echo 'root:mysecretpassword123' | chpasswd
+# Allow root login
+RUN sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+
+# 3. Setup App Directory
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# 4. Install Playwright Browsers
+RUN playwright install chromium
+RUN playwright install-deps
+
+# 5. Copy the Script
+COPY scrape_wellfound_pro.py .
+
+# 6. Expose SSH Port
+EXPOSE 22
+
+# 7. Start SSH Daemon
+CMD ["/usr/sbin/sshd", "-D"]
