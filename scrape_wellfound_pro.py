@@ -19,21 +19,10 @@ def clean_text(text):
 def is_within_24_hours(date_text):
     """
     STRICT FILTER: Returns True only if job is < 24 hours old.
-    Criteria: Contains 'h' (hours), 'm' (mins), 'Just now', 'Today'.
-    Rejects: 'd' (days), 'Yesterday', 'w', 'mo'.
     """
     text = date_text.lower()
-    
-    # Accept specific "fresh" keywords
-    if 'just now' in text or 'today' in text:
-        return True
-    
-    # Accept hours (e.g., "14h", "2h ago") or minutes
-    # Regex checks if it starts with number followed by 'h' or 'm'
-    if re.search(r'\d+\s*h', text) or re.search(r'\d+\s*m', text):
-        return True
-        
-    # Reject everything else (d, w, mo, yesterday)
+    if 'just now' in text or 'today' in text: return True
+    if re.search(r'\d+\s*h', text) or re.search(r'\d+\s*m', text): return True
     return False
 
 def parse_relative_date(date_text):
@@ -45,7 +34,6 @@ def parse_relative_date(date_text):
         date_text = date_text.lower()
         target_date = today 
         
-        # Simple parsing for WP Format
         if 'yesterday' in date_text:
             target_date = today - timedelta(days=1)
         elif 'mo' in date_text:
@@ -61,7 +49,6 @@ def parse_relative_date(date_text):
             num = int(match.group()) if match else 1
             target_date = today - timedelta(days=num)
         
-        # Note: Hours/Mins usually fall under "Today" date
         return target_date.strftime('%m/%d/%Y, 09:00 AM')
     except:
         return datetime.now().strftime('%m/%d/%Y, 09:00 AM')
@@ -70,7 +57,7 @@ def parse_relative_date(date_text):
 
 def scrape_jobs_pro(keyword="software engineer", limit=5):
     data = []
-    seen_urls = set() # Set para sa duplicate checking (within this run)
+    seen_urls = set()
     
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -91,81 +78,66 @@ def scrape_jobs_pro(keyword="software engineer", limit=5):
             page.wait_for_load_state("networkidle")
         except: pass
 
-        # Scroll to load fresh items
         for _ in range(3):
             page.mouse.wheel(0, 3000)
             random_sleep(1, 2)
 
-        # Find Cards
         job_cards = page.locator('div[data-test="JobCard"]').all()
         if not job_cards: job_cards = page.locator('div[class^="styles_component__"]').all()
 
-        print(f"Log: Processing {len(job_cards)} cards (Strict 24h Filter)...", file=sys.stderr)
+        print(f"Log: Processing {len(job_cards)} cards...", file=sys.stderr)
 
         count = 0
         for card in job_cards:
             if count >= limit: break
 
             try:
-                # 1. CHECK DATE FIRST (Optimization)
+                # 1. Date Check
                 date_posted_raw = "Unknown"
                 meta_spans = card.locator('span').all_inner_texts()
-                
-                # Extract date text (e.g., "4h", "2d")
                 for txt in meta_spans:
                     if re.match(r'\d+[dwhmo]', txt) or 'just now' in txt.lower() or 'today' in txt.lower() or 'yesterday' in txt.lower():
                         date_posted_raw = txt
                         break
                 
-                # --- STRICT 24H FILTER ---
-                # Kung hindi fresh (walang 'h', 'm', 'today'), SKIP AGAD.
-                if not is_within_24_hours(date_posted_raw):
-                    # print(f"Log: Skipped old job: {date_posted_raw}", file=sys.stderr)
-                    continue 
+                if not is_within_24_hours(date_posted_raw): continue 
 
-                # 2. CHECK SALARY (USD Only)
+                # 2. Salary Check
                 raw_text = card.inner_text()
                 if "₹" in raw_text or "€" in raw_text or "£" in raw_text: continue 
                 
                 salary_text = "Hidden"
                 salary_loc = card.locator('span:has-text("$")')
                 if salary_loc.count() > 0: salary_text = salary_loc.first.inner_text()
-                # if "$" not in salary_text: continue # Uncomment for Strict USD
 
-                # 3. CHECK DUPLICATES (URL Check)
+                # 3. Duplicate Check
                 link = card.locator('a').first
                 job_url = "https://wellfound.com" + link.get_attribute('href')
-                
-                if job_url in seen_urls:
-                    continue # Skip duplicate in current list
+                if job_url in seen_urls: continue 
                 seen_urls.add(job_url)
 
-                # --- IF PASSED FILTERS, SCRAPE DETAILS ---
-                
-                # Get Basic Info
+                # --- Scrape Details ---
                 title = card.locator('h2').first.inner_text()
                 company = card.locator('div[class*="companyName"]').first.inner_text()
-                job_post_date = parse_relative_date(date_posted_raw) # Format for WP
+                job_post_date = parse_relative_date(date_posted_raw)
 
-                # Open Page
                 detail_page = context.new_page()
                 detail_page.goto(job_url)
                 try: detail_page.wait_for_selector('body', timeout=10000)
                 except: detail_page.close(); continue
                 random_sleep(1, 2)
 
-                # Scrape Content
                 content_html = detail_page.content()
                 soup = BeautifulSoup(content_html, 'html.parser')
                 full_text = soup.get_text(separator="\n")
 
-                # Get Website
+                # Website
                 company_website = "Not Available"
                 try:
                     profile_link = detail_page.locator(f'a[href^="/company/"]').first
                     if profile_link.count() > 0:
                         profile_url = "https://wellfound.com" + profile_link.get_attribute('href')
-                        detail_page.goto(profile_url) # Go to profile
+                        detail_page.goto(profile_url)
                         try:
                             website_el = detail_page.locator('a[data-test="CompanyUrl"]').first
                             if website_el.count() == 0: website_el = detail_page.locator('a:has-text("Website")').first
@@ -174,7 +146,7 @@ def scrape_jobs_pro(keyword="software engineer", limit=5):
                         except: company_website = profile_url
                 except: pass
 
-                # Extract Fields
+                # Fields
                 qualifications = "See Job Description"
                 for marker in ["Requirements", "Qualifications", "What we look for", "Skills"]:
                     if marker in full_text:
@@ -204,7 +176,7 @@ def scrape_jobs_pro(keyword="software engineer", limit=5):
                         app_type = "External Application"
                 except: pass
 
-                # Build Data
+                # Build Data (ITO YUNG PART NA MAY ERROR KANINA, INAYOS KO NA)
                 job_data = {
                     "job_title": title,
                     "company_name": company,
@@ -214,4 +186,28 @@ def scrape_jobs_pro(keyword="software engineer", limit=5):
                     "location": "Latin America (Remote)",
                     "company_description": clean_text(company_desc),
                     "job_description_snippet": clean_text(full_text[:1000]), 
-                    "qualifications": clean_text(qualification
+                    "qualifications": clean_text(qualifications),
+                    "required_tools": ", ".join(tools_found),
+                    "industries": ", ".join(industries_found),
+                    "application_type": app_type,
+                    "hours_per_week": hours,
+                    "external_apply_link": job_url
+                }
+
+                data.append(job_data)
+                count += 1
+                detail_page.close()
+
+            except Exception as e:
+                try: detail_page.close()
+                except: pass
+                continue
+
+        browser.close()
+
+    print(json.dumps(data))
+
+if __name__ == "__main__":
+    kw = sys.argv[1] if len(sys.argv) > 1 else "software engineer"
+    lim = int(sys.argv[2]) if len(sys.argv) > 2 else 5
+    scrape_jobs_pro(kw, lim)
