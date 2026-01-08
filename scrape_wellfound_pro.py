@@ -5,7 +5,6 @@ import re
 import random
 from datetime import datetime, timedelta
 from playwright.sync_api import sync_playwright
-from playwright_stealth import stealth_sync # <--- NEW IMPORT
 from bs4 import BeautifulSoup
 
 # --- CONSTANTS ---
@@ -66,7 +65,7 @@ def scrape_jobs_pro(keyword="all", limit=5, is_test_mode=False):
     seen_urls = set()
     
     with sync_playwright() as p:
-        # Browser Launch (Stealth Mode Enabled)
+        # Browser Launch (Stealth Mode Args)
         browser = p.chromium.launch(
             headless=True, 
             args=[
@@ -82,10 +81,16 @@ def scrape_jobs_pro(keyword="all", limit=5, is_test_mode=False):
         )
         
         page = context.new_page()
-        # ACTIVATE STEALTH
-        stealth_sync(page)
+        
+        # --- MANUAL STEALTH INJECTION (No library needed) ---
+        page.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined
+            });
+        """)
+        # ----------------------------------------------------
 
-        # URL
+        # URL Strategy
         if keyword.lower() == "all" or keyword == "":
             url = "https://wellfound.com/jobs"
             print(f"Log: Searching ALL jobs...", file=sys.stderr)
@@ -95,17 +100,17 @@ def scrape_jobs_pro(keyword="all", limit=5, is_test_mode=False):
         
         try:
             page.goto(url, timeout=60000)
-            random_sleep(3, 5) # Initial wait
+            random_sleep(3, 5) 
             
-            # Check Title
+            # CHECK TITLE (Blocked or Not?)
             page_title = page.title()
             print(f"Log: Page Title: '{page_title}'", file=sys.stderr)
 
-            # --- DEBUG: Kung nasa homepage tayo, try natin mag-search manually ---
-            if page_title.strip() == "wellfound.com" or "Log In" in page.content():
-                 print("Log: Redirected to Home/Login. Attempting to click Jobs link...", file=sys.stderr)
+            # LOGIN REDIRECT CHECK
+            if "Log In" in page.content() or "Sign Up" in page_title:
+                 print("Log: Redirected to Login Wall. Attempting bypass...", file=sys.stderr)
+                 # Try to find a public job listing link if stuck on home
                  try:
-                     # Try clicking "Jobs" or "Find a Job" if available
                      page.get_by_text("Jobs", exact=True).first.click()
                      page.wait_for_load_state("networkidle")
                      random_sleep(3, 5)
@@ -121,16 +126,17 @@ def scrape_jobs_pro(keyword="all", limit=5, is_test_mode=False):
 
         # Find Cards
         job_cards = page.locator('div[data-test="JobCard"]').all()
+        # Fallback
         if not job_cards: 
             job_cards = page.locator('div[class^="styles_component__"]').all()
 
         print(f"Log: Found {len(job_cards)} cards.", file=sys.stderr)
 
-        # --- DEBUG: KUNG 0 CARDS, PRINT HTML SNIPPET ---
+        # DEBUG: Print HTML snippet if 0 cards found
         if len(job_cards) == 0:
-            content_sample = page.content()[:1000] # First 1000 chars
+            content_sample = page.content()[:500] 
             clean_sample = clean_text(content_sample)
-            print(f"Log: DEBUG PAGE CONTENT: {clean_sample}", file=sys.stderr)
+            print(f"Log: PAGE CONTENT SAMPLE: {clean_sample}", file=sys.stderr)
 
         count = 0
         for card in job_cards:
@@ -139,10 +145,9 @@ def scrape_jobs_pro(keyword="all", limit=5, is_test_mode=False):
             try:
                 full_card_text = card.inner_text()
                 
-                # Filter LATAM
+                # Filters
                 if not is_latam_location(full_card_text): continue
 
-                # Filter Date
                 date_posted_raw = "Unknown"
                 if 'just now' in full_card_text.lower(): date_posted_raw = "Just now"
                 elif 'today' in full_card_text.lower(): date_posted_raw = "Today"
@@ -153,7 +158,6 @@ def scrape_jobs_pro(keyword="all", limit=5, is_test_mode=False):
                 if not is_test_mode:
                     if not is_within_24_hours(date_posted_raw): continue 
 
-                # Filter Salary
                 if "₹" in full_card_text or "€" in full_card_text or "£" in full_card_text: continue 
                 salary_text = "Hidden"
                 if "$" in full_card_text:
@@ -161,7 +165,6 @@ def scrape_jobs_pro(keyword="all", limit=5, is_test_mode=False):
                     for l in lines:
                         if "$" in l: salary_text = l; break
                 
-                # Duplicate Check
                 try:
                     link = card.locator('a').first
                     job_url = "https://wellfound.com" + link.get_attribute('href')
@@ -169,15 +172,16 @@ def scrape_jobs_pro(keyword="all", limit=5, is_test_mode=False):
                 if job_url in seen_urls: continue 
                 seen_urls.add(job_url)
 
-                # Scrape
+                # Scrape Details
                 title = card.locator('h2').first.inner_text()
                 company = card.locator('div[class*="companyName"]').first.inner_text()
                 job_post_date = parse_relative_date(date_posted_raw)
 
                 detail_page = context.new_page()
-                stealth_sync(detail_page) # Stealth on detail page too
-                detail_page.goto(job_url)
+                # Inject stealth script to detail page too
+                detail_page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
                 
+                detail_page.goto(job_url)
                 try: detail_page.wait_for_selector('body', timeout=10000)
                 except: detail_page.close(); continue
                 random_sleep(1, 2)
