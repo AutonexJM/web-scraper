@@ -1,22 +1,32 @@
-FROM mcr.microsoft.com/playwright/python:v1.40.0-jammy
+# Gamitin ang medyo bago-bagong base image
+FROM mcr.microsoft.com/playwright/python:v1.48.0-jammy
 
-# Install SSH
+# 1. Install SSH Server
 RUN apt-get update && apt-get install -y openssh-server
 
-# Setup Users & Passwords (FORCE method)
+# 2. Setup SSH Password
 RUN mkdir /var/run/sshd
 RUN echo 'root:mysecretpassword123' | chpasswd
-
-# Setup Config (Append directly to verify it sticks)
+# Force allow root login
 RUN echo "PermitRootLogin yes" >> /etc/ssh/sshd_config
 RUN echo "PasswordAuthentication yes" >> /etc/ssh/sshd_config
 
-# Setup App
+# 3. Setup App Folder
 WORKDIR /app
+
+# 4. Install Python Libraries
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
+# --- MAGIC FIX: I-install ang tamang browser version ---
+# Kahit mag-update ang Python library, ito ang magda-download ng tamang Chrome
+RUN playwright install chromium
+RUN playwright install-deps
+# -------------------------------------------------------
+
+# 5. Copy the Script
 COPY scrape_wellfound_pro.py .
 
-# Start
+# 6. Start SSH
 EXPOSE 22
 CMD ["/usr/sbin/sshd", "-D"]
