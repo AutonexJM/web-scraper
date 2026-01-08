@@ -1,5 +1,10 @@
-# Gamitin ang v1.49.0 para match sa requirements
+# Gamitin ang match na version (v1.49.0)
 FROM mcr.microsoft.com/playwright/python:v1.49.0-jammy
+
+# --- THE MISSING KEY: THE MAP ---
+# Sabihin natin sa script: "Wag ka sa /root/.cache humanap. Dito ka sa /ms-playwright tumingin."
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+# --------------------------------
 
 # 1. Install SSH
 RUN apt-get update && apt-get install -y openssh-server
@@ -10,19 +15,14 @@ RUN echo 'root:mysecretpassword123' | chpasswd
 RUN echo "PermitRootLogin yes" >> /etc/ssh/sshd_config
 RUN echo "PasswordAuthentication yes" >> /etc/ssh/sshd_config
 
-# 3. Setup App
+# 3. App Setup
 WORKDIR /app
 
-# 4. Install Libraries
+# 4. Install Dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# --- THE UNIVERSAL FIX ---
-# Ito ang kulang kanina. Pipilitin nating lagyan ng browser
-# kung saan siya hinahanap ng script (sa /root/.cache).
-RUN playwright install chromium
-RUN playwright install-deps
-# -------------------------
+# (Hindi na kailangan mag 'RUN playwright install' kasi ituturo na lang natin yung existing)
 
 # 5. Copy Script & Start
 COPY scrape_wellfound_pro.py .
