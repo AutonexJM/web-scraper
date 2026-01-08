@@ -1,31 +1,25 @@
-FROM python:3.9-slim
+# CHEAT CODE: Gamitin ang Official Image (May Python + Chrome + Playwright na sa loob!)
+FROM mcr.microsoft.com/playwright/python:v1.40.0-jammy
 
-# 1. Install System Deps & SSH Server
-RUN apt-get update && apt-get install -y \
-    openssh-server \
-    && rm -rf /var/lib/apt/lists/*
+# 1. Install SSH Server lang (kasi meron na tayong Browsers)
+RUN apt-get update && apt-get install -y openssh-server
 
-# 2. Setup SSH
+# 2. Setup SSH Password
 RUN mkdir /var/run/sshd
-# Set root password (PALITAN MO TO!)
+# TANDAAN: Ito ang password na gagamitin mo sa n8n
 RUN echo 'root:mysecretpassword123' | chpasswd
-# Allow root login
 RUN sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
 
-# 3. Setup App Directory
+# 3. Setup App Folder
 WORKDIR /app
+
+# 4. Install other Python Libraries (BeautifulSoup, etc.)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-
-# 4. Install Playwright Browsers
-RUN playwright install chromium
-RUN playwright install-deps
 
 # 5. Copy the Script
 COPY scrape_wellfound_pro.py .
 
-# 6. Expose SSH Port
+# 6. Start SSH
 EXPOSE 22
-
-# 7. Start SSH Daemon
 CMD ["/usr/sbin/sshd", "-D"]
