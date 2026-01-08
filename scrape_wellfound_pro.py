@@ -39,7 +39,7 @@ def is_within_24_hours(date_text):
 def parse_relative_date(date_text):
     try:
         today = datetime.now()
-        date_text = date_text.lower()
+        date_text = date_text.lower().replace("reposted:", "").strip() # Clean "Reposted"
         target_date = today 
         if 'yesterday' in date_text: target_date = today - timedelta(days=1)
         elif 'mo' in date_text:
@@ -58,14 +58,6 @@ def parse_relative_date(date_text):
     except:
         return datetime.now().strftime('%m/%d/%Y, 09:00 AM')
 
-def mimic_human(page):
-    """Simulate mouse movements"""
-    for _ in range(3):
-        x = random.randint(100, 1000)
-        y = random.randint(100, 800)
-        page.mouse.move(x, y)
-        random_sleep(0.5, 1)
-
 # --- MAIN SCRAPER ---
 
 def scrape_jobs_pro(keyword="all", limit=5, is_test_mode=False):
@@ -73,83 +65,52 @@ def scrape_jobs_pro(keyword="all", limit=5, is_test_mode=False):
     seen_urls = set()
     
     with sync_playwright() as p:
-        # HEAVY EVASION LAUNCH ARGS
+        # Browser Launch 
         browser = p.chromium.launch(
             headless=True, 
             args=[
                 '--no-sandbox', 
                 '--disable-setuid-sandbox', 
-                '--disable-blink-features=AutomationControlled',
-                '--disable-infobars',
-                '--window-size=1920,1080',
-                '--start-maximized'
-            ],
-            ignore_default_args=["--enable-automation"] # Important anti-detect
+                '--disable-blink-features=AutomationControlled'
+            ]
         )
-        
-        # Use a consistent Windows User Agent
         context = browser.new_context(
             user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             viewport={'width': 1920, 'height': 1080},
-            locale='en-US',
-            timezone_id='America/New_York',
-            device_scale_factor=1,
+            locale='en-US'
         )
         
         page = context.new_page()
         
-        # --- MANUAL STEALTH INJECTION ---
-        page.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-            Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
-            Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3]});
-        """)
+        # Manual Stealth
+        page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
+        # URL Strategy
+        if keyword.lower() == "all" or keyword == "":
+            url = "https://wellfound.com/jobs"
+            print(f"Log: Searching ALL jobs...", file=sys.stderr)
+        else:
+            url = f"https://wellfound.com/jobs?role={keyword}"
+            print(f"Log: Searching for '{keyword}'...", file=sys.stderr)
+        
         try:
-            # 1. GO TO HOMEPAGE FIRST (Avoid Direct Link Detection)
-            print("Log: Going to Homepage first...", file=sys.stderr)
-            page.goto("https://wellfound.com/", timeout=60000)
-            random_sleep(3, 5)
-            
-            # Check if blocked immediately
-            if "wellfound.com" in page.title().strip(): 
-                # Usually means blocked/challenge page if title is just domain
-                print("Log: Warning - Title is suspicious. Moving mouse...", file=sys.stderr)
-            
-            mimic_human(page)
-            
-            # 2. CLICK 'JOBS' or NAVIGATE
-            print("Log: Navigating to Jobs...", file=sys.stderr)
-            
-            # Construct Target URL
-            if keyword.lower() == "all" or keyword == "":
-                target_url = "https://wellfound.com/jobs"
-            else:
-                target_url = f"https://wellfound.com/jobs?role={keyword}"
-            
-            # Try to click link if exists, otherwise force goto
-            try:
-                # Attempt to find navigation link
-                page.get_by_role("link", name="Jobs").first.click()
-                random_sleep(2, 4)
-                
-                # If we need to search, type it
-                if keyword.lower() != "all" and keyword != "":
-                     # Note: Implementing search bar typing is complex, fallback to URL
-                     page.goto(target_url)
-            except:
-                page.goto(target_url)
+            page.goto(url, timeout=60000)
+            random_sleep(3, 5) 
 
-            page.wait_for_load_state("networkidle")
-            random_sleep(3, 6)
+            # Check Redirects
+            if "Log In" in page.content() or page.title().strip() == "wellfound.com":
+                 print("Log: Homepage Redirect detected. Trying to click Jobs...", file=sys.stderr)
+                 try:
+                     page.get_by_text("Jobs", exact=True).first.click()
+                     page.wait_for_load_state("networkidle")
+                 except: pass
 
         except Exception as e:
-            print(f"Log: Nav Error: {e}", file=sys.stderr)
+            print(f"Log: Nav error: {e}", file=sys.stderr)
 
         # Scroll
-        print("Log: Scrolling...", file=sys.stderr)
-        for _ in range(4):
-            page.mouse.wheel(0, 3000)
+        for _ in range(5):
+            page.mouse.wheel(0, 4000)
             random_sleep(1, 3)
 
         # Find Cards
@@ -158,10 +119,6 @@ def scrape_jobs_pro(keyword="all", limit=5, is_test_mode=False):
             job_cards = page.locator('div[class^="styles_component__"]').all()
 
         print(f"Log: Found {len(job_cards)} cards.", file=sys.stderr)
-
-        # DEBUG: Print Title if 0
-        if len(job_cards) == 0:
-            print(f"Log: BLOCKED? Page Title: {page.title()}", file=sys.stderr)
 
         count = 0
         for card in job_cards:
@@ -184,10 +141,16 @@ def scrape_jobs_pro(keyword="all", limit=5, is_test_mode=False):
                     if not is_within_24_hours(date_posted_raw): continue 
 
                 if "₹" in full_card_text or "€" in full_card_text or "£" in full_card_text: continue 
+                
+                # --- FIXED SALARY LOGIC HERE ---
                 salary_text = "Hidden"
                 if "$" in full_card_text:
                     lines = full_card_text.split('\n')
-                    for l in lines: if "$" in l: salary_text = l; break
+                    for l in lines:
+                        if "$" in l:
+                            salary_text = l
+                            break
+                # -------------------------------
                 
                 try:
                     link = card.locator('a').first
@@ -196,7 +159,7 @@ def scrape_jobs_pro(keyword="all", limit=5, is_test_mode=False):
                 if job_url in seen_urls: continue 
                 seen_urls.add(job_url)
 
-                # Scrape
+                # Scrape Details
                 title = card.locator('h2').first.inner_text()
                 company = card.locator('div[class*="companyName"]').first.inner_text()
                 job_post_date = parse_relative_date(date_posted_raw)
