@@ -7,7 +7,15 @@ from datetime import datetime, timedelta
 from playwright.sync_api import sync_playwright
 from bs4 import BeautifulSoup
 
-# --- HELPER FUNCTIONS ---
+# --- LISTAHAN NG MGA BANSA SA LATAM ---
+LATAM_KEYWORDS = [
+    "Latin America", "LATAM", "Remote - Latin America",
+    "Argentina", "Bolivia", "Brazil", "Brasil", "Chile", "Colombia", 
+    "Costa Rica", "Cuba", "Dominican Republic", "Ecuador", "El Salvador", 
+    "Guatemala", "Honduras", "Mexico", "Nicaragua", "Panama", "Paraguay", 
+    "Peru", "Puerto Rico", "Uruguay", "Venezuela", "Buenos Aires", "Sao Paulo", 
+    "Bogota", "Lima", "Santiago", "Mexico City"
+]
 
 def random_sleep(min_s=2, max_s=5):
     time.sleep(random.uniform(min_s, max_s))
@@ -16,27 +24,27 @@ def clean_text(text):
     if not text: return ""
     return text.strip().replace('\n', ' ').replace('\r', '')
 
+def is_latam_location(text):
+    """Checks if the text contains any LATAM country or city"""
+    if not text: return False
+    text = text.lower()
+    for key in LATAM_KEYWORDS:
+        if key.lower() in text:
+            return True
+    return False
+
 def is_within_24_hours(date_text):
-    """
-    STRICT FILTER: Returns True only if job is < 24 hours old.
-    """
     text = date_text.lower()
     if 'just now' in text or 'today' in text: return True
-    # Matches "4h", "14h", "30m"
     if re.search(r'\d+\s*h', text) or re.search(r'\d+\s*m', text): return True
     return False
 
 def parse_relative_date(date_text):
-    """
-    Convert relative time to WordPress Format: MM/DD/YYYY, 09:00 AM
-    """
     try:
         today = datetime.now()
         date_text = date_text.lower()
         target_date = today 
-        
-        if 'yesterday' in date_text:
-            target_date = today - timedelta(days=1)
+        if 'yesterday' in date_text: target_date = today - timedelta(days=1)
         elif 'mo' in date_text:
             match = re.search(r'\d+', date_text)
             num = int(match.group()) if match else 1
@@ -49,7 +57,6 @@ def parse_relative_date(date_text):
             match = re.search(r'\d+', date_text)
             num = int(match.group()) if match else 1
             target_date = today - timedelta(days=num)
-        
         return target_date.strftime('%m/%d/%Y, 09:00 AM')
     except:
         return datetime.now().strftime('%m/%d/%Y, 09:00 AM')
@@ -61,77 +68,104 @@ def scrape_jobs_pro(keyword="all", limit=5, is_test_mode=False):
     seen_urls = set()
     
     with sync_playwright() as p:
+        # Browser Launch (Mas Stealthy)
         browser = p.chromium.launch(
             headless=True, 
-            args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled']
+            args=[
+                '--no-sandbox', 
+                '--disable-setuid-sandbox', 
+                '--disable-blink-features=AutomationControlled',
+                '--start-maximized'
+            ]
         )
         context = browser.new_context(
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
-            viewport={'width': 1366, 'height': 768}
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            viewport={'width': 1920, 'height': 1080}
         )
         page = context.new_page()
 
-        # --- URL LOGIC (ALL JOBS vs SPECIFIC ROLE) ---
+        # --- URL STRATEGY ---
+        # Strategy: Search lang ng keyword, tapos sa Python natin ifi-filter kung LATAM.
+        # Mas reliable to kasi minsan sablay ang URL filter ng Wellfound.
         if keyword.lower() == "all" or keyword == "":
-            # Search ALL jobs in LATAM
-            url = "https://wellfound.com/jobs?locations=Latin+America"
-            print(f"Log: Searching ALL jobs in LATAM...", file=sys.stderr)
+            url = "https://wellfound.com/jobs" # General Jobs Page
+            print(f"Log: Searching ALL jobs (Will filter LATAM manually)...", file=sys.stderr)
         else:
-            # Search specific role
-            url = f"https://wellfound.com/jobs?role={keyword}&locations=Latin+America"
-            print(f"Log: Searching for '{keyword}' in LATAM...", file=sys.stderr)
+            url = f"https://wellfound.com/jobs?role={keyword}"
+            print(f"Log: Searching for '{keyword}'...", file=sys.stderr)
         
-        if is_test_mode:
-            print("Log: TEST MODE ON (Ignorning 24h limit)", file=sys.stderr)
-
         try:
             page.goto(url, timeout=60000)
+            
+            # --- DEBUGGING: CHECK KUNG BLOCKED ---
+            page_title = page.title()
+            print(f"Log: Page Title loaded: '{page_title}'", file=sys.stderr)
+            
+            if "Just a moment" in page_title or "Cloudflare" in page_title:
+                print("Log: CRITICAL - Cloudflare Blocked us. Retrying with wait...", file=sys.stderr)
+                random_sleep(10, 15) # Wait baka lumusot
+            
             page.wait_for_load_state("networkidle")
-        except: pass
+        except Exception as e:
+            print(f"Log: Navigation error: {e}", file=sys.stderr)
 
         # Scroll
-        for _ in range(3):
-            page.mouse.wheel(0, 3000)
-            random_sleep(1, 2)
+        print("Log: Scrolling to find jobs...", file=sys.stderr)
+        for _ in range(5): # Mas maraming scroll
+            page.mouse.wheel(0, 4000)
+            random_sleep(1, 3)
 
+        # Find Cards
         job_cards = page.locator('div[data-test="JobCard"]').all()
-        if not job_cards: job_cards = page.locator('div[class^="styles_component__"]').all()
+        # Fallback Selectors
+        if not job_cards: 
+            print("Log: data-test selector failed, trying classes...", file=sys.stderr)
+            job_cards = page.locator('div[class^="styles_component__"]').all()
 
-        print(f"Log: Processing {len(job_cards)} cards...", file=sys.stderr)
+        print(f"Log: Found {len(job_cards)} total cards (Before filtering)...", file=sys.stderr)
 
         count = 0
         for card in job_cards:
             if count >= limit: break
 
             try:
-                # 1. Date Check
-                date_posted_raw = "Unknown"
-                meta_spans = card.locator('span').all_inner_texts()
-                for txt in meta_spans:
-                    if re.match(r'\d+[dwhmo]', txt) or 'just now' in txt.lower() or 'today' in txt.lower() or 'yesterday' in txt.lower():
-                        date_posted_raw = txt
-                        break
+                # --- GET CARD TEXT ---
+                full_card_text = card.inner_text()
                 
-                # --- FILTER LOGIC ---
-                # Kung HINDI Test Mode, i-apply ang Strict 24h Filter.
-                # Kung Test Mode, lusot lang kahit luma na.
+                # 1. LATAM LOCATION CHECK (The "Country Scanner")
+                # Hahanapin natin kung may "Argentina", "Brazil", "LATAM", etc. sa card.
+                # Kung WALA, skip natin (unless 'all' at walang location filter).
+                # Pero dahil gusto mo LATAM only:
+                if not is_latam_location(full_card_text):
+                    # print("Log: Skipped non-LATAM job", file=sys.stderr)
+                    continue
+
+                # 2. Date Check
+                date_posted_raw = "Unknown"
+                if 'just now' in full_card_text.lower(): date_posted_raw = "Just now"
+                elif 'today' in full_card_text.lower(): date_posted_raw = "Today"
+                else:
+                    match = re.search(r'(\d+[dwhmo])', full_card_text)
+                    if match: date_posted_raw = match.group(1)
+                
                 if not is_test_mode:
                     if not is_within_24_hours(date_posted_raw): continue 
 
-                # 2. Salary Check (Keep this strict para USD lang makuha mo)
-                raw_text = card.inner_text()
-                if "₹" in raw_text or "€" in raw_text or "£" in raw_text: continue 
-                
+                # 3. Salary Check (USD Only)
+                if "₹" in full_card_text or "€" in full_card_text or "£" in full_card_text: continue 
                 salary_text = "Hidden"
-                salary_loc = card.locator('span:has-text("$")')
-                if salary_loc.count() > 0: salary_text = salary_loc.first.inner_text()
+                if "$" in full_card_text:
+                    # Simple extraction fallback
+                    lines = full_card_text.split('\n')
+                    for l in lines:
+                        if "$" in l: salary_text = l; break
                 
-                # Uncomment next line kung gusto mo USD SHOWN only (no hidden)
-                # if "$" not in salary_text: continue
+                # 4. Duplicate Check
+                try:
+                    link = card.locator('a').first
+                    job_url = "https://wellfound.com" + link.get_attribute('href')
+                except: continue
 
-                # 3. Duplicate Check
-                link = card.locator('a').first
-                job_url = "https://wellfound.com" + link.get_attribute('href')
                 if job_url in seen_urls: continue 
                 seen_urls.add(job_url)
 
@@ -140,6 +174,7 @@ def scrape_jobs_pro(keyword="all", limit=5, is_test_mode=False):
                 company = card.locator('div[class*="companyName"]').first.inner_text()
                 job_post_date = parse_relative_date(date_posted_raw)
 
+                # Open Page
                 detail_page = context.new_page()
                 detail_page.goto(job_url)
                 try: detail_page.wait_for_selector('body', timeout=10000)
@@ -150,22 +185,17 @@ def scrape_jobs_pro(keyword="all", limit=5, is_test_mode=False):
                 soup = BeautifulSoup(content_html, 'html.parser')
                 full_text = soup.get_text(separator="\n")
 
-                # Website
+                # Website Logic
                 company_website = "Not Available"
                 try:
                     profile_link = detail_page.locator(f'a[href^="/company/"]').first
                     if profile_link.count() > 0:
                         profile_url = "https://wellfound.com" + profile_link.get_attribute('href')
-                        detail_page.goto(profile_url)
-                        try:
-                            website_el = detail_page.locator('a[data-test="CompanyUrl"]').first
-                            if website_el.count() == 0: website_el = detail_page.locator('a:has-text("Website")').first
-                            if website_el.count() > 0: company_website = website_el.get_attribute('href')
-                            else: company_website = profile_url
-                        except: company_website = profile_url
+                        # Don't visit profile to save time/detection, just use profile URL as fallback
+                        company_website = profile_url 
                 except: pass
 
-                # Fields
+                # Extract Fields
                 qualifications = "See Job Description"
                 for marker in ["Requirements", "Qualifications", "What we look for", "Skills"]:
                     if marker in full_text:
@@ -182,7 +212,7 @@ def scrape_jobs_pro(keyword="all", limit=5, is_test_mode=False):
                     for t in detail_page.locator('div[class*="Tag"]').all(): tags.append(t.inner_text())
                 except: pass
                 
-                tools_found = [t for t in tags if any(kt.lower() in t.lower() for kt in ["Python", "React", "Node", "AWS", "Docker", "SQL", "Java", "Go", "Javascript", "Typescript", "PHP", "Laravel"])]
+                tools_found = [t for t in tags if any(kt.lower() in t.lower() for kt in ["Python", "React", "Node", "AWS", "Docker", "SQL", "Java", "Go"])]
                 industries_found = [t for t in tags if t not in tools_found]
                 if not tools_found: tools_found = tags[:3]
 
@@ -195,14 +225,13 @@ def scrape_jobs_pro(keyword="all", limit=5, is_test_mode=False):
                         app_type = "External Application"
                 except: pass
 
-                # Build Data
                 job_data = {
                     "job_title": title,
                     "company_name": company,
                     "company_website": company_website,
                     "job_post_date": job_post_date,
                     "salary_offer": salary_text,
-                    "location": "Latin America (Remote)",
+                    "location": "Latin America (Remote)", # Static text since we filtered already
                     "company_description": clean_text(company_desc),
                     "job_description_snippet": clean_text(full_text[:1000]), 
                     "qualifications": clean_text(qualifications),
@@ -227,13 +256,8 @@ def scrape_jobs_pro(keyword="all", limit=5, is_test_mode=False):
     print(json.dumps(data))
 
 if __name__ == "__main__":
-    # ARG 1: Keyword (Use "all" for everything)
     kw = sys.argv[1] if len(sys.argv) > 1 else "all"
-    
-    # ARG 2: Limit
     lim = int(sys.argv[2]) if len(sys.argv) > 2 else 5
-    
-    # ARG 3: Test Mode (If present, disable 24h filter)
     test_mode = False
     if len(sys.argv) > 3 and sys.argv[3] == "test":
         test_mode = True
