@@ -16,7 +16,7 @@ LATAM_KEYWORDS = [
     "Peru", "Puerto Rico", "Uruguay", "Venezuela"
 ]
 
-def random_sleep(min_s=3, max_s=6):
+def random_sleep(min_s=2, max_s=5):
     time.sleep(random.uniform(min_s, max_s))
 
 def clean_text(text):
@@ -60,106 +60,68 @@ def parse_relative_date(date_text):
 
 # --- MAIN SCRAPER ---
 
-def scrape_jobs_pro(keyword="all", limit=5, is_test_mode=False):
+def scrape_jobs_pro(keyword="all", limit=5, is_test_mode=False, session_cookie=None):
     data = []
     seen_urls = set()
     
     with sync_playwright() as p:
-        # 1. HEAVY STEALTH ARGS
         browser = p.chromium.launch(
             headless=True, 
-            args=[
-                '--no-sandbox', 
-                '--disable-setuid-sandbox', 
-                '--disable-blink-features=AutomationControlled',
-                '--disable-infobars',
-                '--window-size=1920,1080',
-                '--start-maximized'
-            ]
+            args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled']
         )
-        
-        # 2. DEVICE EMULATION
         context = browser.new_context(
             user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             viewport={'width': 1920, 'height': 1080},
-            locale='en-US',
-            timezone_id='America/New_York'
+            locale='en-US'
         )
         
-        # 3. SET HEADERS (MAGMUKHANG GALING GOOGLE)
-        context.set_extra_http_headers({
-            "Referer": "https://www.google.com/",
-            "Upgrade-Insecure-Requests": "1",
-            "Accept-Language": "en-US,en;q=0.9",
-            "sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-            "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua-platform": '"Windows"'
-        })
+        # --- COOKIE INJECTION (THE KEY) ---
+        if session_cookie and session_cookie != "none":
+            # print("Log: Injecting Login Cookie...", file=sys.stderr)
+            context.add_cookies([{
+                'name': '_wellfound',
+                'value': session_cookie,
+                'domain': '.wellfound.com',
+                'path': '/'
+            }])
+        # ----------------------------------
         
         page = context.new_page()
-        
-        # 4. JS BYPASS
-        page.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-            Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
-            window.chrome = { runtime: {} };
-        """)
+        page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
-        # URL SELECTION
+        # URL
         if keyword.lower() == "all" or keyword == "":
-            # Use specific landing page instead of generic /jobs to avoid redirect
             url = "https://wellfound.com/jobs"
-            print(f"Log: Searching ALL jobs via Google Referrer...", file=sys.stderr)
+            print(f"Log: Searching ALL jobs...", file=sys.stderr)
         else:
-            url = f"https://wellfound.com/role/{keyword.replace(' ', '-').lower()}"
-            print(f"Log: Searching for role '{keyword}'...", file=sys.stderr)
-
+            url = f"https://wellfound.com/jobs?role={keyword}"
+            print(f"Log: Searching for '{keyword}'...", file=sys.stderr)
+        
         try:
             page.goto(url, timeout=60000)
             random_sleep(3, 5) 
-
-            # TITLE CHECK DEBUG
+            
+            # Check Title
             page_title = page.title()
             print(f"Log: Page Title: '{page_title}'", file=sys.stderr)
 
-            # REDIRECT HANDLER
-            if "Log In" in page.content() or page_title.strip() == "wellfound.com" or "Wellfound: " in page_title:
-                 print("Log: Redirected to Home. Trying to navigate via UI...", file=sys.stderr)
-                 try:
-                     # Hanapin ang 'Find a job' o 'Jobs' link
-                     job_link = page.get_by_role("link", name="Jobs").first
-                     if not job_link.is_visible():
-                         job_link = page.get_by_role("link", name="Find a job").first
-                     
-                     if job_link.is_visible():
-                         job_link.click()
-                         page.wait_for_load_state("networkidle")
-                         random_sleep(2, 4)
-                 except Exception as e:
-                     print(f"Log: Failed to click jobs: {e}", file=sys.stderr)
+            # LOGIN CHECK (Kung redirected pa rin kahit may cookie)
+            if "Log In" in page.content() and not session_cookie:
+                 print("Log: Redirected to Home (Try providing a cookie!)", file=sys.stderr)
 
         except Exception as e:
             print(f"Log: Nav error: {e}", file=sys.stderr)
 
         # Scroll
-        print("Log: Scrolling...", file=sys.stderr)
         for _ in range(5):
-            page.mouse.wheel(0, 5000)
-            random_sleep(2, 4)
+            page.mouse.wheel(0, 4000)
+            random_sleep(1, 3)
 
         # Find Cards
         job_cards = page.locator('div[data-test="JobCard"]').all()
-        if not job_cards: 
-            job_cards = page.locator('div[class^="styles_component__"]').all()
+        if not job_cards: job_cards = page.locator('div[class^="styles_component__"]').all()
 
         print(f"Log: Found {len(job_cards)} cards.", file=sys.stderr)
-
-        # DEBUG HTML IF 0
-        if len(job_cards) == 0:
-            h1 = "No H1"
-            try: h1 = page.locator("h1").inner_text()
-            except: pass
-            print(f"Log: NO CARDS. Current H1: '{h1}'.", file=sys.stderr)
 
         count = 0
         for card in job_cards:
@@ -168,6 +130,7 @@ def scrape_jobs_pro(keyword="all", limit=5, is_test_mode=False):
             try:
                 full_card_text = card.inner_text()
                 
+                # Filters
                 if not is_latam_location(full_card_text): continue
 
                 date_posted_raw = "Unknown"
@@ -182,6 +145,7 @@ def scrape_jobs_pro(keyword="all", limit=5, is_test_mode=False):
 
                 if "₹" in full_card_text or "€" in full_card_text or "£" in full_card_text: continue 
                 
+                # Salary
                 salary_text = "Hidden"
                 if "$" in full_card_text:
                     lines = full_card_text.split('\n')
@@ -195,14 +159,15 @@ def scrape_jobs_pro(keyword="all", limit=5, is_test_mode=False):
                 if job_url in seen_urls: continue 
                 seen_urls.add(job_url)
 
-                # Scrape Details
+                # Scrape
                 title = card.locator('h2').first.inner_text()
                 company = card.locator('div[class*="companyName"]').first.inner_text()
                 job_post_date = parse_relative_date(date_posted_raw)
 
                 detail_page = context.new_page()
-                detail_page.set_extra_http_headers({"Referer": "https://www.google.com/"})
-                detail_page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+                # Inject cookie in new tab too
+                if session_cookie and session_cookie != "none":
+                    context.add_cookies([{'name': '_wellfound', 'value': session_cookie, 'domain': '.wellfound.com', 'path': '/'}])
                 
                 detail_page.goto(job_url)
                 try: detail_page.wait_for_selector('body', timeout=10000)
@@ -282,6 +247,14 @@ def scrape_jobs_pro(keyword="all", limit=5, is_test_mode=False):
 if __name__ == "__main__":
     kw = sys.argv[1] if len(sys.argv) > 1 else "all"
     lim = int(sys.argv[2]) if len(sys.argv) > 2 else 5
+    
+    # Arg 3: Test Mode
     test_mode = False
     if len(sys.argv) > 3 and sys.argv[3] == "test": test_mode = True
-    scrape_jobs_pro(kw, lim, test_mode)
+    
+    # Arg 4: SESSION COOKIE (New Argument)
+    cookie_val = "none"
+    if len(sys.argv) > 4:
+        cookie_val = sys.argv[4]
+
+    scrape_jobs_pro(kw, lim, test_mode, cookie_val)
