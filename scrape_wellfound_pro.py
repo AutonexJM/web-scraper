@@ -16,6 +16,8 @@ LATAM_KEYWORDS = [
     "Peru", "Puerto Rico", "Uruguay", "Venezuela"
 ]
 
+# --- HELPERS ---
+
 def random_sleep(min_s=2, max_s=5):
     time.sleep(random.uniform(min_s, max_s))
 
@@ -58,13 +60,35 @@ def parse_relative_date(date_text):
     except:
         return datetime.now().strftime('%m/%d/%Y, 09:00 AM')
 
+def parse_cookie_string(cookie_string):
+    """Converts raw cookie string from Chrome DevTools into Playwright format"""
+    cookies = []
+    if not cookie_string or cookie_string == "none":
+        return cookies
+    
+    # Split by semicolon
+    parts = cookie_string.split(';')
+    for part in parts:
+        if '=' in part:
+            try:
+                name, value = part.strip().split('=', 1)
+                cookies.append({
+                    'name': name,
+                    'value': value,
+                    'domain': '.wellfound.com', 
+                    'path': '/'
+                })
+            except: pass
+    return cookies
+
 # --- MAIN SCRAPER ---
 
-def scrape_jobs_pro(keyword="all", limit=5, is_test_mode=False, cookie_header=""):
+def scrape_jobs_pro(keyword="all", limit=5, is_test_mode=False, raw_cookie_string=""):
     data = []
     seen_urls = set()
     
     with sync_playwright() as p:
+        # 1. SETUP BROWSER
         browser = p.chromium.launch(
             headless=True, 
             args=[
@@ -75,26 +99,21 @@ def scrape_jobs_pro(keyword="all", limit=5, is_test_mode=False, cookie_header=""
             ]
         )
         
-        # --- HEADERS SETUP ---
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Referer": "https://www.google.com/"
-        }
-        
-        # Inject FULL Cookie String if provided
-        if cookie_header and cookie_header != "none":
-            headers["Cookie"] = cookie_header
-            # print("Log: Using Full Cookie Header Injection...", file=sys.stderr)
-        
+        # 2. CREATE CONTEXT
         context = browser.new_context(
-            user_agent=headers["User-Agent"],
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             viewport={'width': 1920, 'height': 1080},
-            extra_http_headers=headers
+            locale='en-US'
         )
         
+        # 3. INJECT COOKIES
+        if raw_cookie_string and raw_cookie_string != "none":
+            parsed_cookies = parse_cookie_string(raw_cookie_string)
+            if parsed_cookies:
+                context.add_cookies(parsed_cookies)
+        
         page = context.new_page()
+        # Manual Stealth
         page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
         # URL
@@ -106,15 +125,17 @@ def scrape_jobs_pro(keyword="all", limit=5, is_test_mode=False, cookie_header=""
             print(f"Log: Searching for '{keyword}'...", file=sys.stderr)
         
         try:
+            # Navigate
             page.goto(url, timeout=60000)
             random_sleep(3, 5) 
             
-            # Check Title
+            # Debug Logs
             page_title = page.title()
             print(f"Log: Page Title: '{page_title}'", file=sys.stderr)
 
-            if "Log In" in page.content() and not cookie_header:
-                 print("Log: Redirected (Try providing full cookie string)", file=sys.stderr)
+            # Redirect Handler
+            if "Log In" in page.content() or page_title.strip() == "wellfound.com":
+                 print("Log: Homepage Redirect detected. Cookie might be expired or weak.", file=sys.stderr)
 
         except Exception as e:
             print(f"Log: Nav error: {e}", file=sys.stderr)
@@ -137,6 +158,7 @@ def scrape_jobs_pro(keyword="all", limit=5, is_test_mode=False, cookie_header=""
             try:
                 full_card_text = card.inner_text()
                 
+                # Filters
                 if not is_latam_location(full_card_text): continue
 
                 date_posted_raw = "Unknown"
@@ -155,7 +177,9 @@ def scrape_jobs_pro(keyword="all", limit=5, is_test_mode=False, cookie_header=""
                 if "$" in full_card_text:
                     lines = full_card_text.split('\n')
                     for l in lines:
-                        if "$" in l: salary_text = l; break
+                        if "$" in l:
+                            salary_text = l
+                            break
                 
                 try:
                     link = card.locator('a').first
@@ -164,13 +188,14 @@ def scrape_jobs_pro(keyword="all", limit=5, is_test_mode=False, cookie_header=""
                 if job_url in seen_urls: continue 
                 seen_urls.add(job_url)
 
-                # Scrape
+                # Scrape Details
                 title = card.locator('h2').first.inner_text()
                 company = card.locator('div[class*="companyName"]').first.inner_text()
                 job_post_date = parse_relative_date(date_posted_raw)
 
-                # New Page (Use same context to keep cookies)
-                detail_page = context.new_page()
+                # Open Detail Page
+                detail_page = context.new_page() 
+                detail_page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
                 detail_page.goto(job_url)
                 
                 try: detail_page.wait_for_selector('body', timeout=10000)
@@ -254,7 +279,6 @@ if __name__ == "__main__":
     test_mode = False
     if len(sys.argv) > 3 and sys.argv[3] == "test": test_mode = True
     
-    # Arg 4: FULL COOKIE STRING
     cookie_val = "none"
     if len(sys.argv) > 4:
         cookie_val = sys.argv[4]
