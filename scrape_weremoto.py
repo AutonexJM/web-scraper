@@ -11,43 +11,33 @@ def get_todays_date():
 def is_fresh_job(text):
     text = text.lower()
     
-    # 1. Super Fresh (Hours/Mins)
+    # 1. Super Fresh (Hours/Mins/New)
     if "new" in text or "nuevo" in text or "just" in text: return True
     if re.search(r'\d+\s*(h|m|min|hour|hora)', text): return True
     
-    # 2. LOOSENED FILTER: Payagan ang "1 day" o "Yesterday"
-    if "1 day" in text or "1 día" in text or "ayer" in text or "yesterday" in text:
+    # 2. WIDER FILTER: Basta may "day" o "día", kunin na.
+    # Mas okay na sumobra kaysa "0 results".
+    # Covers: "1 day", "2 days", "5 dias", "Ayer"
+    if "day" in text or "día" in text or "dia" in text or "ayer" in text or "yesterday" in text:
         return True
         
     return False
 
 def hunt_for_salary(text):
-    """
-    Scans text for salary patterns and determines type (Hourly, Monthly, Yearly).
-    Supports English and Spanish indicators.
-    """
     if not text: return "Not Disclosed", "N/A"
     
     pattern = r'((?:USD\s?|\$)\s?\d[\d,.]*[kK]?(?:\s*-\s*(?:USD\s?|\$)\s?\d[\d,.]*[kK]?)?(?:\s*\/\s*(?:mo|hr|h|month|year|annum|mes|hora|año))?)'
-    
     match = re.search(pattern, text, re.IGNORECASE)
     
     if match:
         salary_str = match.group(1).strip()
         lower_str = salary_str.lower()
+        salary_type = "Monthly"
         
-        salary_type = "Monthly" # Default fallback
-        
-        if any(x in lower_str for x in ['/hr', '/h', 'hour', 'hora']):
-            salary_type = "Hourly"
-        elif any(x in lower_str for x in ['/mo', 'month', 'mes', 'mensual']):
-            salary_type = "Monthly"
-        elif any(x in lower_str for x in ['/yr', 'year', 'annum', 'año', 'anual']):
-            salary_type = "Yearly"
-        elif 'k' in lower_str:
-            salary_type = "Yearly"
-        elif re.search(r'\$\s?\d{1,2}(?:\.\d+)?\s*$', salary_str):
-            salary_type = "Hourly"
+        if any(x in lower_str for x in ['/hr', '/h', 'hour', 'hora']): salary_type = "Hourly"
+        elif any(x in lower_str for x in ['/mo', 'month', 'mes', 'mensual']): salary_type = "Monthly"
+        elif any(x in lower_str for x in ['/yr', 'year', 'annum', 'año', 'anual', 'k']): salary_type = "Yearly"
+        elif re.search(r'\$\s?\d{1,2}(?:\.\d+)?\s*$', salary_str): salary_type = "Hourly"
         
         return salary_str, salary_type
         
@@ -67,15 +57,15 @@ def scrape_weremoto(limit=20, is_test=False):
         try:
             page.goto(url, timeout=60000)
             page.wait_for_load_state("networkidle")
+            print(f"Log: Page Title: {page.title()}", file=sys.stderr)
             
-            # Scroll
             for _ in range(3):
                 page.mouse.wheel(0, 3000)
                 time.sleep(1)
             
-            # Strict Link Filter
-            all_links = page.locator('a[href*="/job-posts/id-"]').all()
-            print(f"Log: Found {len(all_links)} job candidates...", file=sys.stderr)
+            # Get Links (Updated selector for safety)
+            all_links = page.locator('a[href]').all()
+            print(f"Log: Found {len(all_links)} links. Filtering...", file=sys.stderr)
             
             count = 0
             for link_el in all_links:
@@ -85,17 +75,21 @@ def scrape_weremoto(limit=20, is_test=False):
                     href = link_el.get_attribute('href')
                     if not href: continue
                     
+                    # Link Filters
+                    if "job" not in href and "remote" not in href: continue
+                    if any(x in href for x in ["publish", "pricing", "login", "companies", "blog", "category", "tag"]): continue
+
                     full_link = "https://www.weremoto.com" + href if href.startswith("/") else href
                     
                     if full_link in seen_urls: continue
                     seen_urls.add(full_link)
 
-                    # Freshness Check (Updated Logic)
+                    # Freshness Check
                     card_text = link_el.inner_text().strip()
                     if not is_test:
                         if not is_fresh_job(card_text): continue
 
-                    # --- DEEP SCRAPE ---
+                    # Deep Scrape
                     detail_page = browser.new_page()
                     try:
                         detail_page.goto(full_link, timeout=30000)
@@ -103,15 +97,25 @@ def scrape_weremoto(limit=20, is_test=False):
                         full_page_text = detail_page.locator('body').inner_text()[:2000]
                         salary, salary_type = hunt_for_salary(full_page_text)
 
-                        company_name = "N/A"
+                        h1_text = "N/A"
                         if detail_page.locator('h1').count() > 0:
-                            company_name = detail_page.locator('h1').first.inner_text().strip()
+                            h1_text = detail_page.locator('h1').first.inner_text().strip()
+                        
+                        company_name = "See Description"
+                        try:
+                            # Try finding company name logic
+                            company_candidates = detail_page.locator('h1 ~ p, h1 ~ div, .company-name').all_inner_texts()
+                            if company_candidates: company_name = company_candidates[0].strip()
+                        except: pass
 
-                        # Job Title Logic
+                        # Job Title Logic (Check for Role:)
                         job_title = "See Description"
                         role_match = re.search(r'(?:Role|Rol|Puesto|Position)\s*[:\-\—]\s*(.+)', full_page_text, re.IGNORECASE)
                         if role_match:
                             job_title = role_match.group(1).strip()
+                        else:
+                            # If no "Role:", use H1 but flag it for AI to clean
+                            job_title = h1_text 
 
                         description = "Check link"
                         desc_locator = detail_page.locator('div.job-description, article, div.prose')
@@ -128,8 +132,8 @@ def scrape_weremoto(limit=20, is_test=False):
 
                         data.append({
                             "Date Posted": get_todays_date(),
-                            "Company Name": company_name,
                             "Job Title": job_title,
+                            "Company Name": company_name,
                             "Salary": salary,
                             "Salary Type": salary_type,
                             "Location": "Latin America (Remote)",
@@ -146,7 +150,7 @@ def scrape_weremoto(limit=20, is_test=False):
                 except Exception: continue
 
         except Exception as e:
-            print(f"Log: Error: {e}", file=sys.stderr)
+            print(f"Log: Critical Error: {e}", file=sys.stderr)
             
         browser.close()
     
