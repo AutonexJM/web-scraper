@@ -2,79 +2,39 @@ import json
 import sys
 import time
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 from playwright.sync_api import sync_playwright
 
 def get_todays_date():
     return datetime.now().strftime("%m-%d-%Y")
 
-def parse_date_string(date_text):
-    """
-    Kukuha ng date sa text (e.g. 'Jan 12', 'Ene 10') at gagawing object.
-    Returns: datetime object or None
-    """
-    try:
-        # Dictionary para sa English at Spanish months
-        months = {
-            'jan': 1, 'ene': 1, 'january': 1, 'enero': 1,
-            'feb': 2, 'february': 2, 'febrero': 2,
-            'mar': 3, 'march': 3, 'marzo': 3,
-            'apr': 4, 'abr': 4, 'april': 4, 'abril': 4,
-            'may': 5, 'mayo': 5,
-            'jun': 6, 'june': 6, 'junio': 6,
-            'jul': 7, 'july': 7, 'julio': 7,
-            'aug': 8, 'ago': 8, 'august': 8, 'agosto': 8,
-            'sep': 9, 'september': 9, 'septiembre': 9, 'set': 9,
-            'oct': 10, 'october': 10, 'octubre': 10,
-            'nov': 11, 'november': 11, 'noviembre': 11,
-            'dec': 12, 'dic': 12, 'december': 12, 'diciembre': 12
-        }
-        
-        # Regex para hulihin ang "Mon DD" (e.g., Jan 12, Ene 10)
-        match = re.search(r'([a-zA-Z]{3,})\s+(\d{1,2})', date_text, re.IGNORECASE)
-        
-        if match:
-            month_str = match.group(1).lower()[:3] # First 3 chars
-            day = int(match.group(2))
-            
-            if month_str in months:
-                month = months[month_str]
-                current_year = datetime.now().year
-                
-                # Handle year rollover (e.g., Dec 30 post while running in Jan)
-                # Kung ang month ng job ay Dec at Jan ngayon, ibig sabihin last year yun
-                if month == 12 and datetime.now().month == 1:
-                    year = current_year - 1
-                else:
-                    year = current_year
-                    
-                return datetime(year, month, day)
-    except:
-        pass
-    return None
-
-def is_recent_job(text, days_limit=3):
-    """
-    Returns True kung ang job ay posted within 'days_limit' (default 3 days).
-    """
+def is_fresh_job(text):
     text = text.lower()
     
-    # 1. Check Keywords (Instant Pass)
-    if "new" in text or "nuevo" in text or "just" in text or "hours" in text or "horas" in text or "mins" in text:
+    # 1. Super Fresh (Hours/Mins/New)
+    if "new" in text or "nuevo" in text or "just" in text: return True
+    if re.search(r'\d+\s*(h|m|min|hour|hora)', text): return True
+    if "day" in text or "días" in text or "dia" in text or "ayer" in text or "yesterday" in text: return True
+    
+    # 2. CURRENT MONTH STRATEGY (Paluwagin natin)
+    # Kunin ang current month (e.g. "jan", "ene")
+    # Kung nakita natin 'to sa card, kunin na natin.
+    now = datetime.now()
+    
+    # English & Spanish Month names for the CURRENT month
+    current_month_en = now.strftime("%b").lower() # e.g. "jan"
+    
+    # Manual map for Spanish current month
+    spanish_months = {
+        'jan': 'ene', 'feb': 'feb', 'mar': 'mar', 'apr': 'abr', 'may': 'may', 'jun': 'jun',
+        'jul': 'jul', 'aug': 'ago', 'sep': 'sep', 'oct': 'oct', 'nov': 'nov', 'dec': 'dic'
+    }
+    current_month_es = spanish_months.get(current_month_en, "xxx")
+    
+    # Check if current month name exists in text
+    if current_month_en in text or current_month_es in text:
         return True
-    
-    if "today" in text or "hoy" in text: return True
-    if "yesterday" in text or "ayer" in text: return True
-    if "1 day" in text or "1 día" in text: return True
-    
-    # 2. Check Specific Dates (Jan 12, Ene 10)
-    job_date = parse_date_string(text)
-    if job_date:
-        delta = datetime.now() - job_date
-        # Payagan kung within X days (e.g. 3 days)
-        if delta.days <= days_limit:
-            return True
-            
+        
     return False
 
 def hunt_for_salary(text):
@@ -107,7 +67,8 @@ def scrape_weremoto(limit=20, is_test=False):
             page.goto(url, timeout=60000)
             page.wait_for_load_state("networkidle")
             
-            # Scroll
+            print(f"Log: Page Title: {page.title()}", file=sys.stderr)
+            
             for _ in range(3):
                 page.mouse.wheel(0, 3000)
                 time.sleep(1)
@@ -126,12 +87,13 @@ def scrape_weremoto(limit=20, is_test=False):
                     if full_link in seen_urls: continue
                     seen_urls.add(full_link)
 
-                    # --- FRESHNESS CHECK (THE FIX) ---
+                    # --- FRESHNESS CHECK ---
                     card_text = link_el.inner_text().strip()
                     
                     if not is_test:
-                        # Check date with 3-day window
-                        if not is_recent_job(card_text, days_limit=3): 
+                        if not is_fresh_job(card_text):
+                            # LOG NATIN KUNG BAKIT NA-SKIP (Para ma-debug mo)
+                            # print(f"Log: Skipped (Old): {card_text[:30]}...", file=sys.stderr)
                             continue
 
                     # Deep Scrape
@@ -145,25 +107,17 @@ def scrape_weremoto(limit=20, is_test=False):
                         h1 = detail_page.locator('h1').first.inner_text().strip() if detail_page.locator('h1').count() else "N/A"
                         
                         comp = "See Description"
-                        try:
-                            # H1 is usually company in WeRemoto detail
-                            comp = h1 
+                        try: comp = detail_page.locator('h1 ~ p, h1 ~ div, .company-name').first.inner_text().strip()
                         except: pass
 
-                        # Role usually prefixed
-                        title = "See Description"
+                        title = h1 # Default
                         role_match = re.search(r'(?:Role|Rol|Puesto)\s*[:\-\—]\s*(.+)', full_text, re.IGNORECASE)
                         if role_match: title = role_match.group(1).strip()
-                        else: title = h1 # Fallback
 
-                        # Description
-                        desc = "Check link"
+                        desc = full_text[:2000]
                         if detail_page.locator('div.job-description').count():
                             desc = detail_page.locator('div.job-description').first.inner_text()[:3000]
-                        else:
-                            desc = full_text[:2000]
 
-                        # Tags
                         tags_str = "N/A"
                         try:
                             badges = detail_page.locator('span[class*="badge"]').all_inner_texts()
