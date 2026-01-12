@@ -25,3 +25,22 @@ RUN playwright install-deps
 COPY scrape_wellfound_pro.py .
 EXPOSE 22
 CMD ["/usr/sbin/sshd", "-D"]
+
+# ... (ibang commands sa taas)
+
+# 4. Install Dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# --- FIX: Install Browsers ---
+RUN playwright install chromium
+RUN playwright install-deps
+# -----------------------------
+
+# 5. COPY ALL SCRIPTS (Ito ang pagbabago)
+# Kopyahin lahat ng files sa folder papunta sa container
+COPY . .
+
+# 6. Start SSH
+EXPOSE 22
+CMD ["/usr/sbin/sshd", "-D"]
