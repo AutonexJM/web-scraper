@@ -1,46 +1,33 @@
+# Gamitin ang Official Image (v1.49.0 para match sa requirements)
 FROM mcr.microsoft.com/playwright/python:v1.49.0-jammy
 
-# Override location
+# 1. Override location (Para magkita ang script at browser)
 ENV PLAYWRIGHT_BROWSERS_PATH=/root/.cache/ms-playwright
 
-# Install SSH
+# 2. Install SSH Server
 RUN apt-get update && apt-get install -y openssh-server
 
-# Setup User
+# 3. Setup SSH User & Password
 RUN mkdir /var/run/sshd
 RUN echo 'root:mysecretpassword123' | chpasswd
 RUN echo "PermitRootLogin yes" >> /etc/ssh/sshd_config
 RUN echo "PasswordAuthentication yes" >> /etc/ssh/sshd_config
 
+# 4. Setup App Folder
 WORKDIR /app
 
-# Install Libraries (Kasama na ang stealth)
+# 5. Install Dependencies (requirements.txt)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Force Browser Install
+# 6. Force Install Browsers (Para sigurado)
 RUN playwright install chromium
 RUN playwright install-deps
 
-COPY scrape_wellfound_pro.py .
-EXPOSE 22
-CMD ["/usr/sbin/sshd", "-D"]
-
-# ... (ibang commands sa taas)
-
-# 4. Install Dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# --- FIX: Install Browsers ---
-RUN playwright install chromium
-RUN playwright install-deps
-# -----------------------------
-
-# 5. COPY ALL SCRIPTS (Ito ang pagbabago)
-# Kopyahin lahat ng files sa folder papunta sa container
+# 7. COPY ALL SCRIPTS (Ito ang magic para makuha pati weremoto)
+# Ang ibig sabihin ng dot-to-dot (. .) ay "Kopyahin lahat ng files dito papunta sa container"
 COPY . .
 
-# 6. Start SSH
+# 8. Start SSH
 EXPOSE 22
 CMD ["/usr/sbin/sshd", "-D"]
