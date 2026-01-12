@@ -10,9 +10,48 @@ def get_todays_date():
 
 def is_fresh_job(text):
     text = text.lower()
+    
+    # 1. Super Fresh (Hours/Mins)
     if "new" in text or "nuevo" in text or "just" in text: return True
     if re.search(r'\d+\s*(h|m|min|hour|hora)', text): return True
+    
+    # 2. LOOSENED FILTER: Payagan ang "1 day" o "Yesterday"
+    if "1 day" in text or "1 día" in text or "ayer" in text or "yesterday" in text:
+        return True
+        
     return False
+
+def hunt_for_salary(text):
+    """
+    Scans text for salary patterns and determines type (Hourly, Monthly, Yearly).
+    Supports English and Spanish indicators.
+    """
+    if not text: return "Not Disclosed", "N/A"
+    
+    pattern = r'((?:USD\s?|\$)\s?\d[\d,.]*[kK]?(?:\s*-\s*(?:USD\s?|\$)\s?\d[\d,.]*[kK]?)?(?:\s*\/\s*(?:mo|hr|h|month|year|annum|mes|hora|año))?)'
+    
+    match = re.search(pattern, text, re.IGNORECASE)
+    
+    if match:
+        salary_str = match.group(1).strip()
+        lower_str = salary_str.lower()
+        
+        salary_type = "Monthly" # Default fallback
+        
+        if any(x in lower_str for x in ['/hr', '/h', 'hour', 'hora']):
+            salary_type = "Hourly"
+        elif any(x in lower_str for x in ['/mo', 'month', 'mes', 'mensual']):
+            salary_type = "Monthly"
+        elif any(x in lower_str for x in ['/yr', 'year', 'annum', 'año', 'anual']):
+            salary_type = "Yearly"
+        elif 'k' in lower_str:
+            salary_type = "Yearly"
+        elif re.search(r'\$\s?\d{1,2}(?:\.\d+)?\s*$', salary_str):
+            salary_type = "Hourly"
+        
+        return salary_str, salary_type
+        
+    return "Not Disclosed", "N/A"
 
 def scrape_weremoto(limit=20, is_test=False):
     data = []
@@ -29,16 +68,13 @@ def scrape_weremoto(limit=20, is_test=False):
             page.goto(url, timeout=60000)
             page.wait_for_load_state("networkidle")
             
-            # Scroll para lumabas ang jobs
+            # Scroll
             for _ in range(3):
                 page.mouse.wheel(0, 3000)
                 time.sleep(1)
             
-            # --- STRICT URL FILTER ---
-            # Kukunin lang ang links na may "/job-posts/id-"
-            # Ito ang pattern ng SPECIFIC JOB POST sa WeRemoto
+            # Strict Link Filter
             all_links = page.locator('a[href*="/job-posts/id-"]').all()
-            
             print(f"Log: Found {len(all_links)} job candidates...", file=sys.stderr)
             
             count = 0
@@ -54,66 +90,36 @@ def scrape_weremoto(limit=20, is_test=False):
                     if full_link in seen_urls: continue
                     seen_urls.add(full_link)
 
-                    # Freshness Check (List View)
+                    # Freshness Check (Updated Logic)
                     card_text = link_el.inner_text().strip()
                     if not is_test:
                         if not is_fresh_job(card_text): continue
 
-                    # --- DEEP SCRAPE (Pasok sa Job Page) ---
+                    # --- DEEP SCRAPE ---
                     detail_page = browser.new_page()
                     try:
                         detail_page.goto(full_link, timeout=30000)
                         
-                        # 1. COMPANY NAME (Ang H1 sa WeRemoto ay madalas Company Name)
+                        full_page_text = detail_page.locator('body').inner_text()[:2000]
+                        salary, salary_type = hunt_for_salary(full_page_text)
+
                         company_name = "N/A"
                         if detail_page.locator('h1').count() > 0:
                             company_name = detail_page.locator('h1').first.inner_text().strip()
 
-                        # 2. JOB TITLE (Hahanapin sa "Role:" o "Rol:")
+                        # Job Title Logic
                         job_title = "See Description"
-                        page_text = detail_page.locator('body').inner_text()
-                        
-                        # Regex para hanapin ang "Role: XXXXX" o "Rol: XXXXX"
-                        # Hinahanap nito ang text pagkatapos ng 📌 o "Role:" hanggang sa dulo ng linya
-                        role_match = re.search(r'(?:Role|Rol|Puesto|Position)\s*[:\-\—]\s*(.+)', page_text, re.IGNORECASE)
+                        role_match = re.search(r'(?:Role|Rol|Puesto|Position)\s*[:\-\—]\s*(.+)', full_page_text, re.IGNORECASE)
                         if role_match:
                             job_title = role_match.group(1).strip()
-                        else:
-                            # Fallback: Kung walang "Role:", baka yung H1 ay Job Title at yung Company ay nasa URL/Logo
-                            # Pero base sa screenshot mo, Company ang H1.
-                            # So we keep "See Description" kung walang explicit Role line.
-                            pass
 
-                        # 3. DESCRIPTION & SALARY
                         description = "Check link"
                         desc_locator = detail_page.locator('div.job-description, article, div.prose')
                         if desc_locator.count() > 0:
                             description = desc_locator.first.inner_text()[:3000]
                         else:
-                            description = page_text[:2000]
+                            description = full_page_text
 
-                        # Salary Hunt (Regex)
-                        salary = "Not Disclosed"
-                        salary_type = "N/A"
-                        
-                        # Specific regex for salary lines like "Salary: $140k"
-                        salary_match = re.search(r'(?:Salary|Salario|Compensation)\s*[:\-\—]\s*(.+)', page_text, re.IGNORECASE)
-                        
-                        target_text_for_salary = salary_match.group(1) if salary_match else description
-                        
-                        # Parse amount
-                        money_pattern = r'((?:USD\s?|\$)\s?\d[\d,.]*[kK]?(?:\s*-\s*(?:USD\s?|\$)\s?\d[\d,.]*[kK]?)?(?:\s*\/\s*(?:mo|hr|h|month|year|annum))?)'
-                        money_found = re.search(money_pattern, target_text_for_salary)
-                        
-                        if money_found:
-                            salary = money_found.group(1).strip()
-                            # Determine type
-                            lower_sal = salary.lower()
-                            if any(x in lower_sal for x in ['/hr', '/h', 'hour']): salary_type = "Hourly"
-                            elif any(x in lower_sal for x in ['/mo', 'month']): salary_type = "Monthly"
-                            elif 'k' in lower_sal or 'year' in lower_sal: salary_type = "Yearly"
-
-                        # Tags
                         tags_string = "N/A"
                         try:
                             badges = detail_page.locator('span[class*="badge"], div[class*="tag"]').all_inner_texts()
@@ -122,8 +128,8 @@ def scrape_weremoto(limit=20, is_test=False):
 
                         data.append({
                             "Date Posted": get_todays_date(),
-                            "Company Name": company_name, # H1
-                            "Job Title": job_title,       # Role: ...
+                            "Company Name": company_name,
+                            "Job Title": job_title,
                             "Salary": salary,
                             "Salary Type": salary_type,
                             "Location": "Latin America (Remote)",
@@ -140,7 +146,7 @@ def scrape_weremoto(limit=20, is_test=False):
                 except Exception: continue
 
         except Exception as e:
-            print(f"Log: Critical Error: {e}", file=sys.stderr)
+            print(f"Log: Error: {e}", file=sys.stderr)
             
         browser.close()
     
