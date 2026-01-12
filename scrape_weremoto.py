@@ -11,40 +11,43 @@ def get_todays_date():
 def is_fresh_job(text):
     text = text.lower()
     
-    # 1. Super Fresh (Hours/Mins/New)
-    if "new" in text or "nuevo" in text or "just" in text: return True
-    if re.search(r'\d+\s*(h|m|min|hour|hora)', text): return True
-    if "day" in text or "días" in text or "dia" in text or "ayer" in text or "yesterday" in text: return True
-    
-    # 2. CURRENT MONTH STRATEGY (Paluwagin natin)
-    # Kunin ang current month (e.g. "jan", "ene")
-    # Kung nakita natin 'to sa card, kunin na natin.
-    now = datetime.now()
-    
-    # English & Spanish Month names for the CURRENT month
-    current_month_en = now.strftime("%b").lower() # e.g. "jan"
-    
-    # Manual map for Spanish current month
-    spanish_months = {
-        'jan': 'ene', 'feb': 'feb', 'mar': 'mar', 'apr': 'abr', 'may': 'may', 'jun': 'jun',
-        'jul': 'jul', 'aug': 'ago', 'sep': 'sep', 'oct': 'oct', 'nov': 'nov', 'dec': 'dic'
-    }
-    current_month_es = spanish_months.get(current_month_en, "xxx")
-    
-    # Check if current month name exists in text
-    if current_month_en in text or current_month_es in text:
+    # 1. Super Fresh keywords (Instant Pass)
+    if any(x in text for x in ["new", "nuevo", "just", "hours", "horas", "mins", "minutos"]):
         return True
         
+    # 2. Relative Days (Instant Pass)
+    if any(x in text for x in ["day", "días", "dia", "ayer", "yesterday"]):
+        return True
+    
+    # 3. CURRENT MONTH STRATEGY (The Fix)
+    # Kung anong buwan ngayon sa server, hahanapin natin sa text.
+    now = datetime.now()
+    
+    # English & Spanish Month names mapping
+    months_map = {
+        1: ['jan', 'ene'], 2: ['feb'], 3: ['mar'], 4: ['apr', 'abr'],
+        5: ['may'], 6: ['jun'], 7: ['jul'], 8: ['aug', 'ago'],
+        9: ['sep', 'set'], 10: ['oct'], 11: ['nov'], 12: ['dec', 'dic']
+    }
+    
+    current_month_keys = months_map.get(now.month, [])
+    
+    # Check if ANY of the current month names exist in the card text
+    for m in current_month_keys:
+        if m in text:
+            return True
+            
     return False
 
 def hunt_for_salary(text):
     if not text: return "Not Disclosed", "N/A"
     pattern = r'((?:USD\s?|\$)\s?\d[\d,.]*[kK]?(?:\s*-\s*(?:USD\s?|\$)\s?\d[\d,.]*[kK]?)?(?:\s*\/\s*(?:mo|hr|h|month|year|annum|mes|hora|año))?)'
     match = re.search(pattern, text, re.IGNORECASE)
+    
     if match:
         salary_str = match.group(1).strip()
         lower = salary_str.lower()
-        stype = "Monthly"
+        stype = "Monthly" # Default
         if any(x in lower for x in ['/hr', '/h', 'hour']): stype = "Hourly"
         elif any(x in lower for x in ['/mo', 'month', 'mes']): stype = "Monthly"
         elif any(x in lower for x in ['k', 'year']): stype = "Yearly"
@@ -60,19 +63,19 @@ def scrape_weremoto(limit=20, is_test=False):
         browser = p.chromium.launch(headless=True, args=['--no-sandbox'])
         page = browser.new_page()
         
-        url = "https://www.weremoto.com/" 
+        url = "https://www.weremoto.com/"
         print(f"Log: Visiting {url}...", file=sys.stderr)
         
         try:
             page.goto(url, timeout=60000)
             page.wait_for_load_state("networkidle")
             
-            print(f"Log: Page Title: {page.title()}", file=sys.stderr)
-            
+            # Scroll
             for _ in range(3):
                 page.mouse.wheel(0, 3000)
                 time.sleep(1)
             
+            # Link Selector
             all_links = page.locator('a[href*="/job-posts/"]').all()
             print(f"Log: Found {len(all_links)} links. Filtering...", file=sys.stderr)
             
@@ -92,8 +95,8 @@ def scrape_weremoto(limit=20, is_test=False):
                     
                     if not is_test:
                         if not is_fresh_job(card_text):
-                            # LOG NATIN KUNG BAKIT NA-SKIP (Para ma-debug mo)
-                            # print(f"Log: Skipped (Old): {card_text[:30]}...", file=sys.stderr)
+                            # Debug: Uncomment kung gusto mo makita alin ang nire-reject
+                            # print(f"Log: Skipped (Old/No Date): {card_text[:30]}...", file=sys.stderr)
                             continue
 
                     # Deep Scrape
@@ -110,7 +113,7 @@ def scrape_weremoto(limit=20, is_test=False):
                         try: comp = detail_page.locator('h1 ~ p, h1 ~ div, .company-name').first.inner_text().strip()
                         except: pass
 
-                        title = h1 # Default
+                        title = h1 
                         role_match = re.search(r'(?:Role|Rol|Puesto)\s*[:\-\—]\s*(.+)', full_text, re.IGNORECASE)
                         if role_match: title = role_match.group(1).strip()
 
