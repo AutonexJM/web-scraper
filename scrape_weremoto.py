@@ -9,33 +9,17 @@ def get_todays_date():
     return datetime.now().strftime("%m-%d-%Y")
 
 def is_date_fresh_inside_page(text):
-    """
-    Checks the FULL PAGE text for freshness indicators.
-    Returns: True (Fresh), False (Old/Unknown)
-    """
     text = text.lower()
-    
-    # 1. Check relative time (hours, mins, days)
     if any(x in text for x in ["new", "nuevo", "just", "hours", "horas", "mins", "minutos"]): return True
     if any(x in text for x in ["1 day", "1 día", "1 dia", "ayer", "yesterday"]): return True
     
-    # 2. Check CURRENT MONTH (Jan/Ene)
-    # Kukunin natin kung anong buwan ngayon.
+    # Check Current Month (Jan/Ene)
     now = datetime.now()
-    months_map = {
-        1: ['jan', 'ene'], 2: ['feb'], 3: ['mar'], 4: ['apr', 'abr'],
-        5: ['may'], 6: ['jun'], 7: ['jul'], 8: ['aug', 'ago'],
-        9: ['sep', 'set'], 10: ['oct'], 11: ['nov'], 12: ['dec', 'dic']
-    }
-    
+    months_map = { 1: ['jan', 'ene'], 2: ['feb'], 3: ['mar'], 4: ['apr', 'abr'], 5: ['may'], 6: ['jun'], 7: ['jul'], 8: ['aug', 'ago'], 9: ['sep', 'set'], 10: ['oct'], 11: ['nov'], 12: ['dec', 'dic'] }
     current_keys = months_map.get(now.month, [])
     
-    # Check if current month appears (e.g. "Jan 12", "Ene 10")
     for m in current_keys:
-        # Regex check para sure na date (e.g. "Jan 10") at hindi lang random word inside description
-        if re.search(rf'{m}\s+\d{{1,2}}', text): 
-            return True
-            
+        if re.search(rf'{m}\s+\d{{1,2}}', text): return True
     return False
 
 def hunt_for_salary(text):
@@ -59,21 +43,29 @@ def scrape_weremoto(limit=20, is_test=False):
     
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=['--no-sandbox'])
-        page = browser.new_page()
         
-        url = "https://www.weremoto.com/" 
+        # Increase default timeout to 60s
+        context = browser.new_context()
+        context.set_default_timeout(60000) 
+        page = context.new_page()
+        
+        url = "https://www.weremoto.com/"
         print(f"Log: Visiting {url}...", file=sys.stderr)
         
         try:
-            page.goto(url, timeout=60000)
-            page.wait_for_load_state("networkidle")
+            # FAST LOAD CHANGE: domcontentloaded instead of networkidle
+            page.goto(url, timeout=60000, wait_until="domcontentloaded")
+            
+            # Wait a bit for JS elements (Manual safety wait)
+            time.sleep(5)
+            
+            print(f"Log: Page Title: {page.title()}", file=sys.stderr)
             
             # Scroll
             for _ in range(3):
                 page.mouse.wheel(0, 3000)
                 time.sleep(1)
             
-            # Link Selector
             all_links = page.locator('a[href*="/job-posts/"]').all()
             print(f"Log: Found {len(all_links)} links. Processing...", file=sys.stderr)
             
@@ -88,31 +80,29 @@ def scrape_weremoto(limit=20, is_test=False):
                     if full_link in seen_urls: continue
                     seen_urls.add(full_link)
 
-                    # --- REMOVED LIST-VIEW FILTER (Dito yung fix) ---
-                    # Dati dito tayo nag-che-check, eh minsan hidden ang date sa list.
-                    # Ngayon, papasukin natin lahat muna.
-
                     # Deep Scrape
-                    detail_page = browser.new_page()
+                    detail_page = context.new_page()
                     try:
-                        detail_page.goto(full_link, timeout=30000)
+                        # FAST LOAD also for detail page
+                        detail_page.goto(full_link, timeout=45000, wait_until="domcontentloaded")
                         
+                        # Wait for body text to be populated
+                        try: detail_page.wait_for_selector('body', timeout=5000)
+                        except: pass
+
                         full_text = detail_page.locator('body').inner_text()[:3000]
                         
-                        # --- FILTER INSIDE PAGE ---
-                        # Ngayon nasa loob na tayo, check natin kung fresh ba.
                         if not is_test:
                             if not is_date_fresh_inside_page(full_text):
-                                # Kung luma (e.g. Dec), skip natin
-                                # print(f"Log: Old job skipped: {full_link}", file=sys.stderr)
                                 detail_page.close()
                                 continue
 
-                        # Extraction Logic
                         salary, stype = hunt_for_salary(full_text)
-
-                        h1 = detail_page.locator('h1').first.inner_text().strip() if detail_page.locator('h1').count() else "N/A"
                         
+                        h1 = "N/A"
+                        if detail_page.locator('h1').count():
+                            h1 = detail_page.locator('h1').first.inner_text().strip()
+
                         comp = "See Description"
                         try: comp = detail_page.locator('h1 ~ p, h1 ~ div, .company-name').first.inner_text().strip()
                         except: pass
@@ -150,7 +140,7 @@ def scrape_weremoto(limit=20, is_test=False):
                 except: continue
 
         except Exception as e:
-            print(f"Log: Error: {e}", file=sys.stderr)
+            print(f"Log: Critical Error: {e}", file=sys.stderr)
             
         browser.close()
     
