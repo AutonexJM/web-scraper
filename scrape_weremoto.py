@@ -22,21 +22,23 @@ def scrape_weremoto(limit=20, is_test=False):
         browser = p.chromium.launch(headless=True, args=['--no-sandbox'])
         page = browser.new_page()
         
-        url = "https://www.weremoto.com/remote-jobs"
+        # FIX: Gamitin ang Homepage, mali ang /remote-jobs
+        url = "https://www.weremoto.com/" 
         print(f"Log: Visiting {url}...", file=sys.stderr)
         
         try:
             page.goto(url, timeout=60000)
             page.wait_for_load_state("networkidle")
             
+            # Print Title para ma-confirm kung nasa tamang page na
             print(f"Log: Page Title: {page.title()}", file=sys.stderr)
             
-            # Scroll
+            # Scroll para mag-load pa
             for _ in range(3):
                 page.mouse.wheel(0, 3000)
                 time.sleep(1)
             
-            # Get ALL links
+            # Get Links
             all_links = page.locator('a[href]').all()
             print(f"Log: Found {len(all_links)} links. Filtering...", file=sys.stderr)
             
@@ -44,14 +46,17 @@ def scrape_weremoto(limit=20, is_test=False):
             for link_el in all_links:
                 if count >= limit: break
                 
-                # --- OUTER TRY: Filtering Links ---
                 try:
                     href = link_el.get_attribute('href')
                     if not href: continue
                     
-                    # FILTER: Must contain 'job'
-                    if "job" not in href: continue
-                    if "category" in href or "tag" in href: continue
+                    # WeRemoto usually puts jobs under /job-post/ or /p/
+                    if "job" not in href and "remote" not in href: 
+                        continue
+                    
+                    # Iwasan ang non-job pages
+                    if "category" in href or "blog" in href or "login" in href or "companies" in href:
+                        continue
 
                     full_link = "https://www.weremoto.com" + href if href.startswith("/") else href
                     
@@ -63,17 +68,17 @@ def scrape_weremoto(limit=20, is_test=False):
                     if not is_test:
                         if not is_fresh_job(card_text): continue
 
-                    # --- INNER TRY: Deep Scrape ---
+                    # --- DEEP SCRAPE ---
                     detail_page = browser.new_page()
                     try:
                         detail_page.goto(full_link, timeout=30000)
                         
-                        # Extract H1 (Job Title)
+                        # Title
                         h1_text = "N/A"
                         if detail_page.locator('h1').count() > 0:
                             h1_text = detail_page.locator('h1').first.inner_text().strip()
                         
-                        # Extract Description
+                        # Description
                         description = "Check link"
                         desc_locator = detail_page.locator('div.job-description, article, div.prose')
                         if desc_locator.count() > 0:
@@ -81,13 +86,13 @@ def scrape_weremoto(limit=20, is_test=False):
                         else:
                             description = detail_page.locator('body').inner_text()[:2000]
 
-                        # Extract Tags
+                        # Tags
                         tags_string = "N/A"
                         badges = detail_page.locator('span[class*="badge"], div[class*="tag"]').all_inner_texts()
                         if badges:
                             tags_string = ", ".join([b.strip() for b in badges if b.strip()])
 
-                        # Salary Logic
+                        # Salary
                         salary = "Not Disclosed"
                         salary_type = "N/A"
                         if "$" in description or "$" in tags_string:
@@ -107,13 +112,13 @@ def scrape_weremoto(limit=20, is_test=False):
                         })
                         count += 1
                         
-                    except Exception as e:
-                        pass # Ignore errors on individual pages
+                    except Exception:
+                        pass
                     finally:
-                        detail_page.close() # Laging isara ang tab
+                        detail_page.close()
 
-                except Exception as e:
-                    continue # Ignore errors in main loop
+                except Exception:
+                    continue
 
         except Exception as e:
             print(f"Log: Critical Error: {e}", file=sys.stderr)
