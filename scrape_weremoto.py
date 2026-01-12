@@ -21,19 +21,17 @@ def is_strictly_fresh(text):
         return True
     
     # 2. "1 Day" / Yesterday Keywords
-    # Note: We exclude "2 days", "3 days" explicitly just to be safe, though regex handles numbers.
     if any(x in text for x in ["1 day", "1 día", "1 dia", "ayer", "yesterday", "hoy", "today"]):
         return True
         
     # 3. Specific Date Check (Target: TODAY and YESTERDAY only)
+    # We construct "jan 12", "ene 12" dynamically
     now = datetime.now()
     yesterday = now - timedelta(days=1)
     
-    # Months mapping
     months_en = {1: 'jan', 2: 'feb', 3: 'mar', 4: 'apr', 5: 'may', 6: 'jun', 7: 'jul', 8: 'aug', 9: 'sep', 10: 'oct', 11: 'nov', 12: 'dec'}
     months_es = {1: 'ene', 2: 'feb', 3: 'mar', 4: 'abr', 5: 'may', 6: 'jun', 7: 'jul', 8: 'ago', 9: 'sep', 10: 'oct', 11: 'nov', 12: 'dic'}
     
-    # Create strings like "jan 12", "ene 12", "jan 11", "ene 11"
     target_dates = []
     
     # Add Today
@@ -46,7 +44,6 @@ def is_strictly_fresh(text):
     
     # Check if any target date is in the text
     for date_str in target_dates:
-        # Regex to match exact date pattern (e.g. "Jan 12") to avoid partial matches
         if re.search(rf'{date_str}\b', text):
             return True
             
@@ -54,7 +51,6 @@ def is_strictly_fresh(text):
 
 def hunt_for_salary(text):
     if not text: return "Not Disclosed", "N/A"
-    # Regex to capture salary patterns
     pattern = r'((?:USD\s?|\$)\s?\d[\d,.]*[kK]?(?:\s*-\s*(?:USD\s?|\$)\s?\d[\d,.]*[kK]?)?(?:\s*\/\s*(?:mo|hr|h|month|year|annum|mes|hora|año))?)'
     match = re.search(pattern, text, re.IGNORECASE)
     
@@ -75,29 +71,19 @@ def scrape_weremoto(limit=20, is_test=False):
     
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=['--no-sandbox'])
-        
-        # --- TURBO MODE: BLOCK IMAGES ---
-        context = browser.new_context()
-        def block_heavy(route):
-            if route.request.resource_type in ["image", "media", "font", "stylesheet"]:
-                route.abort()
-            else:
-                route.continue_()
-        context.route("**/*", block_heavy)
-        # --------------------------------
-        
-        page = context.new_page()
+        # FULL LOAD MODE: Walang resource blocking
+        page = browser.new_page()
         
         url = "https://www.weremoto.com/" 
-        print(f"Log: Visiting {url} (Turbo Strict)...", file=sys.stderr)
+        print(f"Log: Visiting {url} (Full Load)...", file=sys.stderr)
         
         try:
             page.goto(url, timeout=60000, wait_until="domcontentloaded")
-            time.sleep(2)
+            time.sleep(3) # Give images time to load
             
             # Get Links
             all_links = page.locator('a[href*="/job-posts/"]').all()
-            print(f"Log: Found {len(all_links)} links. Filtering strict...", file=sys.stderr)
+            print(f"Log: Found {len(all_links)} links. Filtering...", file=sys.stderr)
             
             count = 0
             for link_el in all_links:
@@ -110,25 +96,22 @@ def scrape_weremoto(limit=20, is_test=False):
                     if full_link in seen_urls: continue
                     seen_urls.add(full_link)
 
-                    # List View Freshness Check (Initial Pass)
+                    # List View Freshness Check
                     card_text = link_el.inner_text().strip()
                     if not is_test:
-                        # If list view explicitly says "2 days", skip immediately to save time
+                        # Quick check sa labas pa lang. 
+                        # Kung may "2 days" explicitly, skip na agad para tipid oras.
                         if "2 days" in card_text.lower() or "2 dias" in card_text.lower() or "week" in card_text.lower():
                             continue
 
                     # Deep Scrape
-                    detail_page = context.new_page()
+                    detail_page = browser.new_page()
                     try:
-                        detail_page.goto(full_link, timeout=30000, wait_until="domcontentloaded")
+                        detail_page.goto(full_link, timeout=40000, wait_until="domcontentloaded")
                         
-                        # Wait for minimal content
-                        try: detail_page.wait_for_selector('h1', timeout=3000); 
-                        except: pass
-
+                        # Check inside text
                         full_text = detail_page.locator('body').inner_text()[:3000]
                         
-                        # --- STRICT FILTER INSIDE ---
                         if not is_test:
                             if not is_strictly_fresh(full_text):
                                 detail_page.close()
@@ -136,13 +119,28 @@ def scrape_weremoto(limit=20, is_test=False):
 
                         salary, stype = hunt_for_salary(full_text)
                         
+                        # --- COMPANY NAME EXTRACTION (IMPROVED) ---
+                        comp = "See Description"
+                        
+                        # 1. Try finding Image Alt Text (Pag logo lang)
+                        try:
+                            logo_img = detail_page.locator('img[alt]').first
+                            alt_text = logo_img.get_attribute('alt')
+                            if alt_text and len(alt_text) < 50 and "weremoto" not in alt_text.lower():
+                                comp = alt_text
+                        except: pass
+
+                        # 2. Try Standard Text Selectors (Overwrite if found)
+                        try:
+                            # H1 ~ div usually has company name
+                            text_cand = detail_page.locator('h1 ~ div, .company-name').first.inner_text().strip()
+                            if text_cand: comp = text_cand
+                        except: pass
+                        
+                        # Job Title
                         h1 = "N/A"
                         if detail_page.locator('h1').count():
                             h1 = detail_page.locator('h1').first.inner_text().strip()
-
-                        comp = "See Description"
-                        try: comp = detail_page.locator('h1 ~ p, h1 ~ div, .company-name').first.inner_text().strip()
-                        except: pass
 
                         title = h1
                         role_match = re.search(r'(?:Role|Rol|Puesto)\s*[:\-\—]\s*(.+)', full_text, re.IGNORECASE)
