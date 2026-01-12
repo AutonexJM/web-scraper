@@ -8,24 +8,56 @@ from playwright.sync_api import sync_playwright
 def get_todays_date():
     return datetime.now().strftime("%m-%d-%Y")
 
-def is_date_fresh_inside_page(text):
+def is_strictly_fresh(text):
+    """
+    STRICT 24-48 Hour Filter.
+    Accepts: "Hours ago", "1 day ago", "Today", "Yesterday", and specific dates (Jan 12, Jan 11).
+    Rejects: "2 days", "Dec", older dates.
+    """
     text = text.lower()
-    if any(x in text for x in ["new", "nuevo", "just", "hours", "horas", "mins", "minutos"]): return True
-    if any(x in text for x in ["1 day", "1 día", "1 dia", "ayer", "yesterday"]): return True
     
-    # Check Current Month (Jan/Ene)
+    # 1. Relative Time Keywords (Hours/Mins)
+    if any(x in text for x in ["new", "nuevo", "just", "hours", "horas", "mins", "minutos"]):
+        return True
+    
+    # 2. "1 Day" / Yesterday Keywords
+    # Note: We exclude "2 days", "3 days" explicitly just to be safe, though regex handles numbers.
+    if any(x in text for x in ["1 day", "1 día", "1 dia", "ayer", "yesterday", "hoy", "today"]):
+        return True
+        
+    # 3. Specific Date Check (Target: TODAY and YESTERDAY only)
     now = datetime.now()
-    months_map = { 1: ['jan', 'ene'], 2: ['feb'], 3: ['mar'], 4: ['apr', 'abr'], 5: ['may'], 6: ['jun'], 7: ['jul'], 8: ['aug', 'ago'], 9: ['sep', 'set'], 10: ['oct'], 11: ['nov'], 12: ['dec', 'dic'] }
-    current_keys = months_map.get(now.month, [])
+    yesterday = now - timedelta(days=1)
     
-    for m in current_keys:
-        if re.search(rf'{m}\s+\d{{1,2}}', text): return True
+    # Months mapping
+    months_en = {1: 'jan', 2: 'feb', 3: 'mar', 4: 'apr', 5: 'may', 6: 'jun', 7: 'jul', 8: 'aug', 9: 'sep', 10: 'oct', 11: 'nov', 12: 'dec'}
+    months_es = {1: 'ene', 2: 'feb', 3: 'mar', 4: 'abr', 5: 'may', 6: 'jun', 7: 'jul', 8: 'ago', 9: 'sep', 10: 'oct', 11: 'nov', 12: 'dic'}
+    
+    # Create strings like "jan 12", "ene 12", "jan 11", "ene 11"
+    target_dates = []
+    
+    # Add Today
+    target_dates.append(f"{months_en[now.month]} {now.day}")
+    target_dates.append(f"{months_es[now.month]} {now.day}")
+    
+    # Add Yesterday
+    target_dates.append(f"{months_en[yesterday.month]} {yesterday.day}")
+    target_dates.append(f"{months_es[yesterday.month]} {yesterday.day}")
+    
+    # Check if any target date is in the text
+    for date_str in target_dates:
+        # Regex to match exact date pattern (e.g. "Jan 12") to avoid partial matches
+        if re.search(rf'{date_str}\b', text):
+            return True
+            
     return False
 
 def hunt_for_salary(text):
     if not text: return "Not Disclosed", "N/A"
+    # Regex to capture salary patterns
     pattern = r'((?:USD\s?|\$)\s?\d[\d,.]*[kK]?(?:\s*-\s*(?:USD\s?|\$)\s?\d[\d,.]*[kK]?)?(?:\s*\/\s*(?:mo|hr|h|month|year|annum|mes|hora|año))?)'
     match = re.search(pattern, text, re.IGNORECASE)
+    
     if match:
         salary_str = match.group(1).strip()
         lower = salary_str.lower()
@@ -44,30 +76,28 @@ def scrape_weremoto(limit=20, is_test=False):
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=['--no-sandbox'])
         
-        # Increase default timeout to 60s
+        # --- TURBO MODE: BLOCK IMAGES ---
         context = browser.new_context()
-        context.set_default_timeout(60000) 
+        def block_heavy(route):
+            if route.request.resource_type in ["image", "media", "font", "stylesheet"]:
+                route.abort()
+            else:
+                route.continue_()
+        context.route("**/*", block_heavy)
+        # --------------------------------
+        
         page = context.new_page()
         
-        url = "https://www.weremoto.com/"
-        print(f"Log: Visiting {url}...", file=sys.stderr)
+        url = "https://www.weremoto.com/" 
+        print(f"Log: Visiting {url} (Turbo Strict)...", file=sys.stderr)
         
         try:
-            # FAST LOAD CHANGE: domcontentloaded instead of networkidle
             page.goto(url, timeout=60000, wait_until="domcontentloaded")
+            time.sleep(2)
             
-            # Wait a bit for JS elements (Manual safety wait)
-            time.sleep(5)
-            
-            print(f"Log: Page Title: {page.title()}", file=sys.stderr)
-            
-            # Scroll
-            for _ in range(3):
-                page.mouse.wheel(0, 3000)
-                time.sleep(1)
-            
+            # Get Links
             all_links = page.locator('a[href*="/job-posts/"]').all()
-            print(f"Log: Found {len(all_links)} links. Processing...", file=sys.stderr)
+            print(f"Log: Found {len(all_links)} links. Filtering strict...", file=sys.stderr)
             
             count = 0
             for link_el in all_links:
@@ -80,20 +110,27 @@ def scrape_weremoto(limit=20, is_test=False):
                     if full_link in seen_urls: continue
                     seen_urls.add(full_link)
 
+                    # List View Freshness Check (Initial Pass)
+                    card_text = link_el.inner_text().strip()
+                    if not is_test:
+                        # If list view explicitly says "2 days", skip immediately to save time
+                        if "2 days" in card_text.lower() or "2 dias" in card_text.lower() or "week" in card_text.lower():
+                            continue
+
                     # Deep Scrape
                     detail_page = context.new_page()
                     try:
-                        # FAST LOAD also for detail page
-                        detail_page.goto(full_link, timeout=45000, wait_until="domcontentloaded")
+                        detail_page.goto(full_link, timeout=30000, wait_until="domcontentloaded")
                         
-                        # Wait for body text to be populated
-                        try: detail_page.wait_for_selector('body', timeout=5000)
+                        # Wait for minimal content
+                        try: detail_page.wait_for_selector('h1', timeout=3000); 
                         except: pass
 
                         full_text = detail_page.locator('body').inner_text()[:3000]
                         
+                        # --- STRICT FILTER INSIDE ---
                         if not is_test:
-                            if not is_date_fresh_inside_page(full_text):
+                            if not is_strictly_fresh(full_text):
                                 detail_page.close()
                                 continue
 
@@ -134,13 +171,14 @@ def scrape_weremoto(limit=20, is_test=False):
                             "Source": "WeRemoto"
                         })
                         count += 1
+                        print(f"Log: Scraped {count}: {title}", file=sys.stderr)
                     except: pass
                     finally: detail_page.close()
 
                 except: continue
 
         except Exception as e:
-            print(f"Log: Critical Error: {e}", file=sys.stderr)
+            print(f"Log: Error: {e}", file=sys.stderr)
             
         browser.close()
     
